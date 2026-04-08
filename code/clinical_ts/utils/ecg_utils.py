@@ -173,7 +173,7 @@ def prepare_ptbv2(data_path="", min_cnt=10, target_fs=1000, channels=12, strat_f
         for _,row in df.iterrows():
             sigbufs, header = wfdb.rdsamp(str(row["filename"])[:-4])
             if header['fs'] != 1000:
-                print(f'frequency is {header['fs']}')
+                print(f"frequency is {header['fs']}")
             data = resample_data(sigbufs=sigbufs,channel_stoi=channel_stoi,channel_labels=header['sig_name'],fs=header['fs'],target_fs=target_fs,channels=channels)
             
             stem=Path(row["filename"]).stem
@@ -323,7 +323,7 @@ def prepare_data_ningbo(data_path, min_cnt=10, target_fs=500, strat_folds=10, ch
         #     print(f'{idx+2} -> {item[0]}: {item[1]}')
         
         metadata = []
-        for filename in tqdm(list(data_path.glob('*.hea'))):
+        for filename in tqdm(list(data_path.glob('**/*.hea'))):
             try:
                 sigbufs, header = wfdb.rdsamp(str(filename)[:-4])
             except:
@@ -410,7 +410,7 @@ def prepare_data_cpsc2018(data_path, min_cnt=10, target_fs=500, strat_folds=10, 
         #     print(f'{idx+2} -> {item[0]}: {item[1]}')
         
         metadata = []
-        for filename in tqdm(list(data_path.glob('*.hea'))):
+        for filename in tqdm(list(data_path.glob('**/*.hea'))):
             try:
                 sigbufs, header = wfdb.rdsamp(str(filename)[:-4])
             except:
@@ -495,7 +495,7 @@ def prepare_data_cpsc_extra(data_path, min_cnt=10, target_fs=500, strat_folds=10
         #     print(f'{idx+2} -> {item[0]}: {item[1]}')
         
         metadata = []
-        for filename in tqdm(list(data_path.glob('*.hea'))):
+        for filename in tqdm(list(data_path.glob('**/*.hea'))):
             try:
                 sigbufs, header = wfdb.rdsamp(str(filename)[:-4])
             except:
@@ -580,7 +580,7 @@ def prepare_data_georgia(data_path, min_cnt=10, target_fs=500, strat_folds=10, c
         #     print(f'{idx+2} -> {item[0]}: {item[1]}')
         
         metadata = []
-        for filename in tqdm(list(data_path.glob('*.hea'))):
+        for filename in tqdm(list(data_path.glob('**/*.hea'))):
             try:
                 sigbufs, header = wfdb.rdsamp(str(filename)[:-4])
             except:
@@ -758,7 +758,16 @@ def prepare_data_sph(data_path, min_cnt=10, target_fs=500, strat_folds=10, chann
         filenames = []
         for index in tqdm(range(len(df_sph))):
             record = df_sph.ecg_id[index]
-            filename = data_path/"records"/(str(record)+".h5")
+            candidate_paths = [
+                data_path / "records" / f"{record}.h5",
+                data_path / f"{record}.h5",
+            ]
+            filename = next((path for path in candidate_paths if path.exists()), None)
+            if filename is None:
+                raise FileNotFoundError(
+                    f"SPH record {record} not found. Checked: "
+                    + ", ".join(str(path) for path in candidate_paths)
+                )
             with h5py.File(filename, 'r') as f:
                 signal = f['ecg'][()].astype('float32') # K,L
                 resampled_signal = resampy.resample(signal, 500, target_fs, axis=1)
@@ -1067,7 +1076,8 @@ def prepare_data_ptb_xl(data_path, min_cnt=10, target_fs=500, channels=12, chann
         filenames = []
         for id, row in tqdm(list(df_ptb_xl.iterrows())):
             # always start from 500Hz and sample down
-            filename = data_path/row["filename_hr"] #data_path/row["filename_lr"] if target_fs<=100 else data_path/row["filename_hr"]
+            filename_rel = Path(row["filename_hr"])
+            filename = data_path / filename_rel / filename_rel.name
             sigbufs, header = wfdb.rdsamp(str(filename))
             data = resample_data(sigbufs=sigbufs,channel_stoi=channel_stoi,channel_labels=header['sig_name'],fs=header['fs'],target_fs=target_fs,channels=channels)
             assert(target_fs<=header['fs'])
@@ -1233,12 +1243,13 @@ def prepare_data_echonext(data_path, target_folder=None, channel_stoi=channel_st
                          channels=12, target_fs=250, strat_folds=10, cv_random_state=42, 
                          recreate_data=True):
     data_path = Path(data_path)
+    release_root = data_path / "1.1.0" if (data_path / "1.1.0").exists() else data_path
     target_root = Path(".") if target_folder is None else target_folder
     target_root.mkdir(parents=True, exist_ok=True)
     
     if recreate_data:
         print("Loading metadata...")
-        metadata_file = data_path / "EchoNext_metadata_100k.csv"
+        metadata_file = release_root / "echonext_metadata_100k.csv"
         if not metadata_file.exists():
             raise FileNotFoundError(f"Metadata file not found: {metadata_file}")
         
@@ -1250,13 +1261,19 @@ def prepare_data_echonext(data_path, target_folder=None, channel_stoi=channel_st
         tabular_data = {}
         
         for split in splits:
-            waveform_file = data_path / f"EchoNext_{split}_waveforms.npy"
-            tabular_file = data_path / f"EchoNext_{split}_tabular_features.npy"
+            waveform_file = release_root / f"EchoNext_{split}_waveforms.npy"
+            tabular_file = release_root / f"EchoNext_{split}_tabular_features.npy"
             
             if waveform_file.exists():
-                waveform_data[split] = np.load(waveform_file)
+                waveform_data[split] = np.load(waveform_file, mmap_mode="r")
             if tabular_file.exists():
-                tabular_data[split] = np.load(tabular_file)
+                tabular_data[split] = np.load(tabular_file, mmap_mode="r")
+
+        if not waveform_data:
+            raise FileNotFoundError(
+                f"No EchoNext waveform arrays found under {release_root}. "
+                f"Expected files like {release_root / 'EchoNext_train_waveforms.npy'}."
+            )
         
         # Process each split
         df["data"] = None
@@ -1370,37 +1387,59 @@ def prepare_mimicecg(data_path="", clip_amp=3, target_fs=500, channels=12, strat
         target_folder = Path(target_folder)
         target_folder.mkdir(parents=True, exist_ok=True)
 
-        with zipfile.ZipFile(Path(data_path)/"mimic-iv-ecg-diagnostic-electrocardiogram-matched-subset-1.0.zip", 'r') as archive:
-            lst = archive.namelist()
-            lst = [x for x in lst if x.endswith(".hea")]
+        data_path = Path(data_path)
+        zip_path = data_path/"mimic-iv-ecg-diagnostic-electrocardiogram-matched-subset-1.0.zip"
+        files_root = data_path/"files"
 
-            meta = []
-            for l in tqdm(lst):
-                archive.extract(l, path="tmp_dir/")
-                archive.extract(l[:-3]+"dat", path="tmp_dir/")
-                filename = Path("tmp_dir")/l
-                sigbufs, header = wfdb.rdsamp(str(filename)[:-4])
-            
-                tmp={}
-                tmp["data"]=filename.parent.parent.stem+"_"+filename.parent.stem+".npy" #patientid_study.npy
-                tmp["study_id"]=int(filename.stem)
-                tmp["subject_id"]=int(filename.parent.parent.stem[1:])
-                tmp['ecg_time']= datetime.datetime.combine(header["base_date"],header["base_time"])
-                tmp["nans"]= list(np.sum(np.isnan(sigbufs),axis=0))#save nans channel-dependent
-                if(np.sum(tmp["nans"])>0):#fix nans
-                    fix_nans_and_clip(sigbufs,clip_amp=clip_amp)
-                elif(clip_amp>0):
-                    sigbufs = np.clip(sigbufs,a_max=clip_amp,a_min=-clip_amp)
+        def process_record(filename):
+            sigbufs, header = wfdb.rdsamp(str(filename)[:-4])
 
-                data = resample_data(sigbufs=sigbufs,channel_stoi=channel_stoi,channel_labels=header['sig_name'],fs=header['fs'],target_fs=target_fs,channels=channels)
-                
-                assert(target_fs<=header['fs'])
-                np.save(target_folder/tmp["data"],data)
-                meta.append(tmp)
-                
-                os.unlink("tmp_dir/"+l)
-                os.unlink("tmp_dir/"+l[:-3]+"dat")
-                shutil.rmtree("tmp_dir")
+            tmp={}
+            tmp["data"]=filename.parent.parent.stem+"_"+filename.parent.stem+".npy" #patientid_study.npy
+            tmp["study_id"]=int(filename.stem)
+            tmp["subject_id"]=int(filename.parent.parent.stem[1:])
+            tmp['ecg_time']= datetime.datetime.combine(header["base_date"],header["base_time"])
+            tmp["nans"]= list(np.sum(np.isnan(sigbufs),axis=0))#save nans channel-dependent
+            if(np.sum(tmp["nans"])>0):#fix nans
+                fix_nans_and_clip(sigbufs,clip_amp=clip_amp)
+            elif(clip_amp>0):
+                sigbufs = np.clip(sigbufs,a_max=clip_amp,a_min=-clip_amp)
+
+            if target_fs > header['fs']:
+                raise ValueError(f"target_fs={target_fs} exceeds source sampling rate {header['fs']} for {filename}")
+
+            data = resample_data(sigbufs=sigbufs,channel_stoi=channel_stoi,channel_labels=header['sig_name'],fs=header['fs'],target_fs=target_fs,channels=channels)
+            np.save(target_folder/tmp["data"],data)
+            return tmp
+
+        meta = []
+        if zip_path.exists():
+            with zipfile.ZipFile(zip_path, 'r') as archive:
+                lst = archive.namelist()
+                lst = [x for x in lst if x.endswith(".hea")]
+
+                for l in tqdm(lst):
+                    archive.extract(l, path="tmp_dir/")
+                    archive.extract(l[:-3]+"dat", path="tmp_dir/")
+                    filename = Path("tmp_dir")/l
+                    meta.append(process_record(filename))
+
+                    os.unlink("tmp_dir/"+l)
+                    os.unlink("tmp_dir/"+l[:-3]+"dat")
+                    shutil.rmtree("tmp_dir")
+        elif files_root.exists():
+            lst = sorted(files_root.rglob("*.hea"))
+            if len(lst) == 0:
+                raise FileNotFoundError(f"Found unpacked MIMIC-IV-ECG directory at {files_root}, but no .hea files were present.")
+            for filename in tqdm(lst):
+                dat_path = filename.with_suffix(".dat")
+                if not dat_path.exists():
+                    raise FileNotFoundError(f"Expected signal file missing for {filename}: {dat_path}")
+                meta.append(process_record(filename))
+        else:
+            raise FileNotFoundError(
+                f"Expected either {zip_path} or unpacked waveform directory {files_root}, but neither exists."
+            )
 
         df = pd.DataFrame(meta)
 
