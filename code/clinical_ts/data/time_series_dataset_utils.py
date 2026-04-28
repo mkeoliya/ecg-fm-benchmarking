@@ -103,8 +103,13 @@ def save_dataset(df,lbl_itos=None,mean=None,std=None,target_root=".",df_filename
 
 def load_dataset(target_root,df_filename="df_memmap.pkl"):
     target_root = Path(target_root)
+    df_path = target_root / df_filename
+    if not df_path.exists() and df_filename == "df_memmap.pkl":
+        df_path = target_root / "df.pkl"
+    if not df_path.exists():
+        raise FileNotFoundError(f"Dataset metadata file not found: {df_path}")
 
-    df = pd.read_pickle(target_root/df_filename)
+    df = pd.read_pickle(df_path)
     
     if((target_root/("lbl_itos.pkl")).exists()):#dict as pickle
         infile = open(target_root/("lbl_itos.pkl"), "rb")
@@ -459,4 +464,3 @@ def load_memmap_meta_dict(memmap_filename):
                     continue  # skip annotation version
                 combined_meta[f"annotation_{k}"] = v
     return combined_meta
-

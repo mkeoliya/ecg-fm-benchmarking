@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from itertools import chain
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -11,24 +12,6 @@ from clinical_ts.utils.heads import LearnableQueryAttentionPoolingHead, Learnabl
 
 from main_lite_base import FMWrapperBase
 
-from clinical_ts.models.ecg_foundation_models.ecg_founder import Net1D
-from clinical_ts.models.ecg_foundation_models.ecg_jepa.ecg_jepa import ecg_jepa
-from clinical_ts.models.ecg_foundation_models.ecg_jepa.ecg_jepa_utils import load_encoder
-from clinical_ts.models.ecg_foundation_models.st_mem.st_mem import st_mem_vit_base_dec256d4b
-
-from clinical_ts.models.ecg_foundation_models.merl.resnet1d import ResNet18
-from clinical_ts.models.ecg_foundation_models.merl.vit1d import vit_tiny
-
-from clinical_ts.models.ecg_foundation_models.ecgfm_ked import xresnet1d101
-
-from clinical_ts.models.ecg_foundation_models.hubert_ecg.hubert_ecg import HuBERTECG
-from clinical_ts.models.ecg_foundation_models.hubert_ecg.hubert_ecg_classification import HuBERTForECGClassification
-from clinical_ts.models.ecg_foundation_models.hubert_ecg.utils import ecg_preprocessing
-from clinical_ts.models.ecg_foundation_models.hubert_ecg.config import hubert_config
-
-from clinical_ts.models.ecg_foundation_models.ecg_cpc.basic_io import load_model_from_config
-
-
 class ECGFounderWrapper(FMWrapperBase):
     """
         Paper: https://arxiv.org/abs/2410.04133
@@ -39,6 +22,7 @@ class ECGFounderWrapper(FMWrapperBase):
     """
     def __init__(self, num_classes, num_output_tokens, pretrained_path=None, eval_mode="finetuning_linear", lr=1e-3, discriminative_lr_factor=0.1):
         super().__init__(num_classes, num_output_tokens)
+        from clinical_ts.models.ecg_foundation_models.ecg_founder import Net1D
 
         assert eval_mode in ["finetuning_linear", "finetuning_nonlinear", "frozen", "linear"]
         self.eval_mode = eval_mode
@@ -183,6 +167,7 @@ class ECGJEPAWrapper(FMWrapperBase):
     """
     def __init__(self, num_classes, num_output_tokens, pretrained_path=None, eval_mode="finetuning_linear", lr=1e-3, discriminative_lr_factor=0.1):
         super().__init__(num_classes, num_output_tokens)
+        from clinical_ts.models.ecg_foundation_models.ecg_jepa.ecg_jepa_utils import load_encoder
 
         assert eval_mode in ["finetuning_linear", "finetuning_nonlinear", "frozen", "linear"]
         self.eval_mode = eval_mode
@@ -310,6 +295,8 @@ class ECGJEPAWrapper(FMWrapperBase):
 class ECG_JEPA_Scratch(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
+        from clinical_ts.models.ecg_foundation_models.ecg_jepa.ecg_jepa import ecg_jepa
+
         self.model = ecg_jepa(
             encoder_embed_dim=768,
             encoder_num_heads=16,
@@ -344,6 +331,7 @@ class StMemWrapper(FMWrapperBase):
     """
     def __init__(self, num_classes, num_output_tokens, pretrained_path=None, eval_mode="finetuning_linear", lr=1e-3, discriminative_lr_factor=0.1):
         super().__init__(num_classes, num_output_tokens)
+        from clinical_ts.models.ecg_foundation_models.st_mem.st_mem import st_mem_vit_base_dec256d4b
 
         assert eval_mode in ["finetuning_linear", "finetuning_nonlinear", "frozen", "linear"]
         self.eval_mode = eval_mode
@@ -489,6 +477,8 @@ class MerlWrapper(FMWrapperBase):
 
     def __init__(self, num_classes, num_output_tokens, backbone="resnet", pretrained_path=None, eval_mode="finetuning_linear", lr=1e-3, discriminative_lr_factor=0.1):
         super().__init__(num_classes, num_output_tokens)
+        from clinical_ts.models.ecg_foundation_models.merl.resnet1d import ResNet18
+        from clinical_ts.models.ecg_foundation_models.merl.vit1d import vit_tiny
 
         assert eval_mode in ["finetuning_linear", "finetuning_nonlinear", "frozen", "linear"]
         assert backbone in ["resnet", "vit"]
@@ -639,6 +629,7 @@ class EcgFmKEDWrapper(FMWrapperBase):
 
     def __init__(self, num_classes, num_output_tokens, pretrained_path=None, eval_mode="finetuning_linear", lr=1e-3, discriminative_lr_factor=0.1):
         super().__init__(num_classes, num_output_tokens)
+        from clinical_ts.models.ecg_foundation_models.ecgfm_ked import xresnet1d101
 
         assert eval_mode in ["finetuning_linear", "finetuning_nonlinear", "frozen", "linear"]
         self.eval_mode = eval_mode
@@ -760,16 +751,35 @@ class EcgFmKEDWrapper(FMWrapperBase):
 
 
 class CPCWrapper(FMWrapperBase):
-    def __init__(self, num_classes, num_output_tokens, config_path=None, eval_mode="finetuning_linear", lr=1e-3, discriminative_lr_factor=0.1):
+    def __init__(self, num_classes, num_output_tokens, config_path=None, dataset_path=None, dataset_name=None, eval_mode="finetuning_linear", lr=1e-3, discriminative_lr_factor=0.1):
         super().__init__(num_classes, num_output_tokens)
+        from clinical_ts.models.ecg_foundation_models.ecg_cpc.basic_io import load_model_from_config
+
         assert eval_mode in ["finetuning_linear", "finetuning_nonlinear", "frozen", "linear"]
+        if config_path is None:
+            raise ValueError("CPCWrapper requires a valid `config_path` to load the encoder.")
+        if dataset_path is None:
+            raise ValueError("CPCWrapper requires a valid `dataset_path` for dataset-specific stats.")
+        if dataset_name is None:
+            raise ValueError("CPCWrapper requires a valid `dataset_name` for dataset-specific stats.")
 
         self.eval_mode = eval_mode
         self.lr = lr
         self.discriminative_lr_factor = discriminative_lr_factor
-        
+
+        config_path = Path(config_path).resolve()
+        checkpoint_path = config_path.with_name("last_11597276.ckpt").resolve()
+        dataset_path = Path(dataset_path).resolve()
+
+        overrides = [
+            f"data0.name={dataset_name}",
+            f"data0.path={dataset_path.as_posix()}",
+            f"trainer.pretrained='{checkpoint_path.as_posix()}'",
+        ]
+
         self.model, self.config = load_model_from_config(
-            config_name=config_path         
+            config_name=config_path.as_posix(),
+            overrides=overrides,
         )
         
         self.feature_dim = 512
@@ -844,11 +854,16 @@ class CPCWrapper(FMWrapperBase):
 class HubertEcgWrapper(FMWrapperBase):
     def __init__(self, num_classes, num_output_tokens, pretrained_path=None, eval_mode="finetuning_linear", lr=1e-3, discriminative_lr_factor=0.1):
         super().__init__(num_classes, num_output_tokens)
+        from clinical_ts.models.ecg_foundation_models.hubert_ecg.config import hubert_config
+        from clinical_ts.models.ecg_foundation_models.hubert_ecg.hubert_ecg import HuBERTECG
+        from clinical_ts.models.ecg_foundation_models.hubert_ecg.hubert_ecg_classification import HuBERTForECGClassification
+        from clinical_ts.models.ecg_foundation_models.hubert_ecg.utils import ecg_preprocessing
 
         assert eval_mode in ["finetuning_linear", "finetuning_nonlinear", "frozen", "linear"]
         self.eval_mode = eval_mode
         self.lr = lr
         self.discriminative_lr_factor = discriminative_lr_factor
+        self.ecg_preprocessing = ecg_preprocessing
 
         pretrained_hubert = HuBERTECG(hubert_config)
         self.model = HuBERTForECGClassification(
@@ -965,7 +980,7 @@ class HubertEcgWrapper(FMWrapperBase):
     def forward(self, x, **kwargs):
         x = torch.nan_to_num(x)
         x_np = x.detach().cpu().numpy()
-        preprocessed = [ecg_preprocessing(sig) for sig in x_np]
+        preprocessed = [self.ecg_preprocessing(sig) for sig in x_np]
         x = torch.from_numpy(np.stack(preprocessed, axis=0)).to(x.device).float()
         x = x.reshape(x.shape[0], -1)
 

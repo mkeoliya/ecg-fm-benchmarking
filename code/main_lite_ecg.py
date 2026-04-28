@@ -18,7 +18,6 @@ from clinical_ts.utils.schedulers import (
     get_invsqrt_decay_schedule_with_warmup,
 )
 from clinical_ts.models.ecg_foundation_models.ecg_founder import Net1D
-from clinical_ts.models.fm_ecg import ECGFounderWrapper, ECGJEPAWrapper, StMemWrapper, MerlWrapper, EcgFmKEDWrapper, HubertEcgWrapper, CPCWrapper, ECG_JEPA_Scratch
 from clinical_ts.utils.stratify import stratified_subset
 
 
@@ -143,6 +142,7 @@ class Main_Lite_ECG(Main_Lite):
         ###################################################################################################
         input_size_model = int(self.hparams.input_size*self.hparams.fs_model )
         if(hparams.architecture=="ecg_founder"):
+            from clinical_ts.models.fm_ecg import ECGFounderWrapper
             self.model = ECGFounderWrapper(
                 num_classes=num_classes,
                 num_output_tokens=input_size_model,
@@ -152,6 +152,7 @@ class Main_Lite_ECG(Main_Lite):
                 discriminative_lr_factor=hparams.discriminative_lr_factor
             )
         elif(hparams.architecture=="ecg_jepa"):
+            from clinical_ts.models.fm_ecg import ECGJEPAWrapper
             self.model = ECGJEPAWrapper(
                 num_classes=num_classes,
                 num_output_tokens=input_size_model,
@@ -161,6 +162,7 @@ class Main_Lite_ECG(Main_Lite):
                 discriminative_lr_factor=hparams.discriminative_lr_factor
             )
         elif(hparams.architecture=="st_mem"):
+            from clinical_ts.models.fm_ecg import StMemWrapper
             self.model = StMemWrapper(
                 num_classes=num_classes,
                 num_output_tokens=input_size_model,
@@ -170,6 +172,7 @@ class Main_Lite_ECG(Main_Lite):
                 discriminative_lr_factor=hparams.discriminative_lr_factor
             )
         elif(hparams.architecture=="merl"):
+            from clinical_ts.models.fm_ecg import MerlWrapper
             self.model = MerlWrapper(
                 num_classes=num_classes,
                 num_output_tokens=input_size_model,
@@ -180,6 +183,7 @@ class Main_Lite_ECG(Main_Lite):
                 discriminative_lr_factor=hparams.discriminative_lr_factor
             )
         elif(hparams.architecture=="ecgfm_ked"):
+            from clinical_ts.models.fm_ecg import EcgFmKEDWrapper
             self.model = EcgFmKEDWrapper(
                 num_classes=num_classes,
                 num_output_tokens=input_size_model,
@@ -213,15 +217,19 @@ class Main_Lite_ECG(Main_Lite):
                 use_do=False,
                 n_classes=num_classes)
         elif(hparams.architecture=="cpc"):
+            from clinical_ts.models.fm_ecg import CPCWrapper
             self.model = CPCWrapper(
                 num_classes=num_classes,
                 num_output_tokens=input_size_model,
                 config_path=hparams.pretrained,
+                dataset_path=hparams.data,
+                dataset_name=hparams.finetune_dataset,
                 eval_mode=hparams.eval_mode,
                 lr=self.lr,
                 discriminative_lr_factor=hparams.discriminative_lr_factor
         )
         elif hparams.architecture == "hubert_ecg":
+            from clinical_ts.models.fm_ecg import HubertEcgWrapper
             self.model = HubertEcgWrapper(
                 num_classes=num_classes,
                 num_output_tokens=input_size_model,
@@ -231,6 +239,7 @@ class Main_Lite_ECG(Main_Lite):
                 discriminative_lr_factor=hparams.discriminative_lr_factor
             )
         elif hparams.architecture == "ecg_jepa_scratch":
+            from clinical_ts.models.fm_ecg import ECG_JEPA_Scratch
             self.model = ECG_JEPA_Scratch(
                 num_classes=num_classes
             )
@@ -245,7 +254,12 @@ class Main_Lite_ECG(Main_Lite):
             df_mapped["label"] = df_mapped["label_filtered_numeric"].apply(lambda x: multihot_encode(x, len(lbl_itos)))
         elif(self.hparams.finetune_dataset == "cpsc2018"):
             df_mapped = df_mapped[df_mapped["data_length"] >= 5000]
-            df_mapped["label"] = df_mapped["labels"].apply(lambda x: multihot_encode(x, len(lbl_itos)))
+            if "label_filtered_numeric" in df_mapped.columns and isinstance(lbl_itos, dict) and "label_filtered" in lbl_itos:
+                lbl_itos = np.array(lbl_itos["label_filtered"])
+                df_mapped["label"] = df_mapped["label_filtered_numeric"].apply(lambda x: multihot_encode(x, len(lbl_itos)))
+            else:
+                label_col = "labels" if "labels" in df_mapped.columns else "label"
+                df_mapped["label"] = df_mapped[label_col].apply(lambda x: multihot_encode(x, len(lbl_itos)))
         elif(self.hparams.finetune_dataset == "cpsc_extra"):
             df_mapped = df_mapped[df_mapped["data_length"] >= 5000]
             lbl_itos = np.array(lbl_itos["label_filtered"])
