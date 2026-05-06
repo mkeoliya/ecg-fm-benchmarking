@@ -4,6 +4,7 @@
 import sys
 import argparse
 import subprocess
+import os
 from pathlib import Path
 
 # Add 'code' directory to python path
@@ -13,8 +14,10 @@ sys.path.append(str(code_dir))
 from clinical_ts.utils.ecg_utils import *
 from clinical_ts.data.time_series_dataset_utils import *
 
-DATASET_DIR = Path("/home/nvelingker/mkeoliya/kardia-lm/src/pipelines/ecg-fm-benchmarking/data")
-TARGET_DIR = Path("processed")
+DEFAULT_DATASET_DIR = Path("/srv/shared_home/common-data/arpa-h/ca")
+DEFAULT_TARGET_DIR = Path("processed")
+DATASET_DIR = Path(os.environ.get("ECG_DATASET_DIR", DEFAULT_DATASET_DIR))
+TARGET_DIR = Path(os.environ.get("ECG_TARGET_DIR", DEFAULT_TARGET_DIR))
 
 CHANNEL_ITOS = "canonical"
 channel_stoi_canonical = {
@@ -149,12 +152,27 @@ DATASET_PROCESSORS = {
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pre-process ECG datasets")
     parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        default=DATASET_DIR,
+        help=f"Root directory containing raw datasets (default: {DATASET_DIR})",
+    )
+    parser.add_argument(
+        "--target-dir",
+        type=Path,
+        default=TARGET_DIR,
+        help=f"Directory where processed datasets will be written (default: {TARGET_DIR})",
+    )
+    parser.add_argument(
         "datasets", 
         nargs="+", 
         choices=list(DATASET_PROCESSORS.keys()) + ["all"],
         help="Which dataset(s) to process, or 'all'"
     )
     args = parser.parse_args()
+
+    DATASET_DIR = args.dataset_dir.resolve()
+    TARGET_DIR = args.target_dir.resolve()
 
     datasets_to_process = args.datasets
     if "all" in datasets_to_process:
@@ -163,6 +181,8 @@ if __name__ == "__main__":
     # Remove duplicates but preserve order
     datasets_to_process = list(dict.fromkeys(datasets_to_process))
 
+    print(f"Raw dataset root: {DATASET_DIR}")
+    print(f"Processed output root: {TARGET_DIR}")
     print(f"Datasets scheduled for processing: {', '.join(datasets_to_process)}")
     print("-" * 50)
     for ds in datasets_to_process:

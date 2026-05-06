@@ -12,17 +12,44 @@ import joblib
 
 import subprocess
 from pathlib import Path
+import argparse
+import sys
 
-from code.clinical_ts.utils.mimic_ecg_preprocessing import prepare_mimic_ecg
-from code.clinical_ts.utils.stratify import *
+code_dir = Path(__file__).resolve().parent / "code"
+sys.path.append(str(code_dir))
+
+from clinical_ts.utils.mimic_ecg_preprocessing import prepare_mimic_ecg
+from clinical_ts.utils.stratify import *
+
+DEFAULT_DATA_DIR = Path("/srv/shared_home/common-data/arpa-h/ca/mimic-iv-ecg/data")
+
+parser = argparse.ArgumentParser(description="Prepare MIMIC benchmark labels and metadata.")
+parser.add_argument(
+    "--data-dir",
+    type=Path,
+    default=DEFAULT_DATA_DIR,
+    help=f"Directory containing MIMIC preprocessing input files (default: {DEFAULT_DATA_DIR})",
+)
+parser.add_argument(
+    "--output-dir",
+    type=Path,
+    default=Path("mimic"),
+    help="Directory where generated benchmark files and caches will be written.",
+)
+args = parser.parse_args()
+
+data_dir = args.data_dir.resolve()
+output_dir = args.output_dir.resolve()
+output_dir.mkdir(parents=True, exist_ok=True)
+
+print(f"MIMIC input data dir: {data_dir}")
+print(f"MIMIC output dir: {output_dir}")
 
 
 # load
-df = pd.read_csv('data/records_w_diag_icd10.csv')
+df = pd.read_csv(data_dir / 'records_w_diag_icd10.csv')
 df['data'] = df.index
 
-# path
-target_folder = Path('mimic')
 for c in ["hosp_diag_hosp" ,"ed_diag_ed", "ed_diag_hosp", "all_diag_hosp", "all_diag_all"]:
     df[c]=df[c].apply(lambda x:eval(x))
     
@@ -43,7 +70,7 @@ df_clean = df.drop(columns=overlap)
 
 df_scenario, lbl_itos_diagnostic = prepare_mimic_ecg(
     finetune_dataset,
-    target_folder,
+    data_dir,
     df_mapped=df_clean
 )
 
@@ -60,11 +87,11 @@ def get_chapter(icd_code):
 
 cardiac_labels = [code for code in lbl_itos_diagnostic if get_chapter(code) == cardiac_chapter]
 noncardiac_labels = [code for code in lbl_itos_diagnostic if get_chapter(code) != cardiac_chapter]
-np.save('lbl_itos_diagnostic.npy', lbl_itos_diagnostic)
+np.save(output_dir / 'lbl_itos_diagnostic.npy', lbl_itos_diagnostic)
 
 
 # load
-dfed = pd.read_csv('data/mds_ed.csv', 
+dfed = pd.read_csv(data_dir / 'mds_ed.csv', 
                    low_memory=False)
 
 deterioration_columns = [i for i in dfed.columns if 'deterioration' in i]
@@ -81,11 +108,11 @@ df["is_deterioration"] = df["data"].isin(dfed["data"]).astype(int)
 mapping = dfed.set_index("data")["label_deterioration"]
 df["label_deterioration"] = df["data"].map(mapping)
 
-np.save('lbl_itos_deterioration.npy', lbl_itos_deterioration)
+np.save(output_dir / 'lbl_itos_deterioration.npy', lbl_itos_deterioration)
 
 
 # load
-dfecgfeatures = pd.read_csv('data/machine_measurements.csv', 
+dfecgfeatures = pd.read_csv(data_dir / 'machine_measurements.csv', 
                             low_memory=False)
 dfecgfeatures['data'] = dfecgfeatures.index
 
@@ -112,23 +139,23 @@ dfecgfeatures = dfecgfeatures[['data','RR','QRS','QT','QTc','P_wave_axis','QRS_a
 df = df.merge(dfecgfeatures, on="data", how="left")
 
 # load
-omr = pd.read_csv('data/omr.csv.gz')
+omr = pd.read_csv(data_dir / 'omr.csv.gz')
 omr = omr[omr['result_name'].isin(['Height (Inches)','Weight (Lbs)','BMI (kg/m2)'])]
 omr = omr.dropna(subset=['result_value'])
 
 # load
-vital = pd.read_csv('data/vitalsign.csv.gz')
+vital = pd.read_csv(data_dir / 'vitalsign.csv.gz')
 vital = vital[['subject_id', 'stay_id', 'charttime', 'temperature', 'heartrate','resprate', 'o2sat', 'sbp', 'dbp']]
 vital['charttime'] = pd.to_datetime(vital['charttime'])
 
 # load
-dflabitems = pd.read_csv('data/d_labitems.csv.gz')
+dflabitems = pd.read_csv(data_dir / 'd_labitems.csv.gz')
 dflabitems = dflabitems[dflabitems['itemid'].isin([50963,51006,52647,50811,51222,51640,50912,52546,50924,50912,52546,51221,51480,51638,51639,52028,
          50862,53085,51006,52647,52172,50811,51222,51640,50868,52500,51277,50882,50885,53089,51221,51480,
          51638,51639,52028,51237,51675,51279,51274,52921,50910,51249,50893,51244])]
 
 # load
-dflabevents = pd.read_csv('data/labevents.csv.gz')
+dflabevents = pd.read_csv(data_dir / 'labevents.csv.gz')
 dflabevents = dflabevents[dflabevents['itemid'].isin(dflabitems['itemid'].unique())]
 dflabevents = dflabevents[dflabevents['valuenum'].notna()]
 dflabevents = dflabevents.merge(dflabitems[['itemid', 'label']], on='itemid', how='left')
@@ -157,10 +184,12 @@ dflabevents = dflabevents[['labevent_id','subject_id','storetime','valuenum','va
 
 # load
 
-d_items_file = 'data/d_items.csv.gz'
-chartevents_file = 'data/chartevents.csv.gz'
+d_items_file = data_dir / 'd_items.csv.gz'
+chartevents_file = data_dir / 'chartevents.csv.gz'
 
-output_file = 'data/filtered_chartevents.csv'
+output_file = output_dir / 'filtered_chartevents.csv'
+if output_file.exists():
+    output_file.unlink()
 
 chunksize = 1_000_000
 min_label_count = 1000
@@ -219,7 +248,7 @@ to_extract = [
 
 chunksize = 1_000_000
 filtered_iter = pd.read_csv(
-    'data/filtered_chartevents.csv',
+    output_file,
     chunksize=chunksize)
 
 dfs = [] 
@@ -416,7 +445,7 @@ metadata_cols = ['age',
                     'PT', 'Albumin', 'Anion Gap', 'Bicarbonate', 'Bilirubin, Total','Calcium, Total', 'Creatinine', 'Ferritin', 'Urea Nitrogen','Hematocrit', 'Hemoglobin', 'Lymphocytes', 'MCHC', 'RDW','Red Blood Cells', 'RDW-SD', 'Creatine Kinase (CK)', 'NTproBNP',
                    'dbp','heartrate','o2sat','resprate','sbp','temperature']
 
-np.save('data/lbl_itos_metadata.npy', metadata_cols)
+np.save(output_dir / 'lbl_itos_metadata.npy', metadata_cols)
 labels_metadata_df = labels_metadata_df[labels_metadata_df['is_diagnostic']==1]
 labels_metadata_df['label_sex'] = labels_metadata_df['gender'].map({'F': 0, 'M': 1}).fillna(np.nan).apply(lambda x: [x])
 
@@ -451,16 +480,16 @@ for df in [train_df, val_df, test_df]:
 # Merge back
 labels_metadata_df_std = pd.concat([train_df, val_df, test_df], ignore_index=True)
 
-joblib_file = 'data/scalers_dict.pkl'
+joblib_file = output_dir / 'scalers_dict.pkl'
 joblib.dump(scalers, joblib_file)
 
 loaded_scalers = joblib.load(joblib_file)
 labels_metadata_df_std['label_metadata'] = labels_metadata_df_std[metadata_cols].values.tolist()
 
-lbl_itos_diags = np.load('data/lbl_itos_diagnostic.npy')
-lbl_itos_det = np.load('data/lbl_itos_deterioration.npy')
+lbl_itos_diags = np.load(output_dir / 'lbl_itos_diagnostic.npy')
+lbl_itos_det = np.load(output_dir / 'lbl_itos_deterioration.npy')
 lbl_itos_sex = np.array(['sex'])
-lbl_itos_meta = np.load('data/lbl_itos_metadata.npy')
+lbl_itos_meta = np.load(output_dir / 'lbl_itos_metadata.npy')
 
 lbl_itos_mimic = np.concatenate([lbl_itos_diags, lbl_itos_det, lbl_itos_sex, lbl_itos_meta])
 
@@ -534,7 +563,5 @@ labels_metadata_df_std['label_all'] = (
     + labels_metadata_df_std['label_metadata']
 )
 
-labels_metadata_df_std.to_pickle('mimic/df_mimic_benchmark.pkl')
-np.save('mimic/lbl_itos_mimic.npy', lbl_itos_mimic)
-
-
+labels_metadata_df_std.to_pickle(output_dir / 'df_mimic_benchmark.pkl')
+np.save(output_dir / 'lbl_itos_mimic.npy', lbl_itos_mimic)

@@ -62,7 +62,7 @@ def prepare_mimic_ecg(finetune_dataset, target_folder, df_mapped=None, df_diags=
             df_diags = pd.read_pickle(target_folder/"records_w_diag_icd10.pkl")
         else:
             df_diags = pd.read_csv(target_folder/"records_w_diag_icd10.csv")
-            df_diags.drop('Unnamed: 0',axis=1, inplace=True)
+            df_diags.drop(columns=['Unnamed: 0'], errors='ignore', inplace=True)
             df_diags['ecg_time']=pd.to_datetime(df_diags["ecg_time"])
             df_diags['dod']=pd.to_datetime(df_diags["dod"])
             for c in ['ed_diag_ed', 'ed_diag_hosp', 'hosp_diag_hosp', 'all_diag_hosp', 'all_diag_all']:
