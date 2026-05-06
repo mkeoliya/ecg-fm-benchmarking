@@ -182,6 +182,16 @@ class Main_Lite_ECG(Main_Lite):
                 lr=self.lr,
                 discriminative_lr_factor=hparams.discriminative_lr_factor
             )
+        elif(hparams.architecture=="camel"):
+            from clinical_ts.models.fm_ecg import CAMELWrapper
+            self.model = CAMELWrapper(
+                num_classes=num_classes,
+                num_output_tokens=input_size_model,
+                pretrained_path=hparams.pretrained,
+                eval_mode=hparams.eval_mode,
+                lr=self.lr,
+                discriminative_lr_factor=hparams.discriminative_lr_factor
+            )
         elif(hparams.architecture=="ecgfm_ked"):
             from clinical_ts.models.fm_ecg import EcgFmKEDWrapper
             self.model = EcgFmKEDWrapper(
@@ -296,6 +306,17 @@ class Main_Lite_ECG(Main_Lite):
             df_mapped.loc[df_mapped["split"] == "test", "strat_fold"] = 9
             df_mapped["label"] = df_mapped["label"].apply(lambda x: multihot_encode(x, len(lbl_itos)))
         elif(self.hparams.finetune_dataset == "mimic"):
+            benchmark_path = target_folder / "df_mimic_benchmark.pkl"
+            if not benchmark_path.exists():
+                raise FileNotFoundError(
+                    f"MIMIC benchmark labels not found at {benchmark_path}. "
+                    "Run mimic_preprocessing.py with --output-dir pointing to the MIMIC processed folder."
+                )
+            df_mapped = pd.read_pickle(benchmark_path)
+            lbl_itos_path = target_folder / "lbl_itos_mimic.npy"
+            if not lbl_itos_path.exists():
+                raise FileNotFoundError(f"MIMIC label names not found at {lbl_itos_path}.")
+            lbl_itos = np.load(lbl_itos_path, allow_pickle=True)
             df_mapped["label"] = df_mapped["label_all"]
         elif(self.hparams.finetune_dataset=="zzu_pecg"):
             df_mapped = df_mapped[df_mapped["data_length"] >= 5000]

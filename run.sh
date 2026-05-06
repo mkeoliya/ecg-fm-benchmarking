@@ -10,15 +10,65 @@
 #SBATCH --time=1-00:00
 #SBATCH --output=/dev/null
 
-BASE_DIR=""
-CHECKPOINTS_DIR=""
-DATASET_DIR=""
+BASE_DIR="${BASE_DIR:-}"
+CHECKPOINTS_DIR="${CHECKPOINTS_DIR:-}"
+DATASET_DIR="${DATASET_DIR:-}"
+CAMEL_PRETRAINED="${CAMEL_PRETRAINED:-/srv/shared_home/common-data/arpa-h/ca/models/m4b/curriculum/stage4/v7/lead_drop/llava_proj_epoch0009.pt}"
 
-EVAL_MODE="frozen"    # finetuning_linear, frozen, linear
-MODEL="cpc"           # ecg_founder, ecg_jepa_multiblock, st_mem, merl_resnet, ecgfm_ked, s4, net1d, cpc, hubert_ecg_base
-DATASET="ptbxl_all"   # mimic, ptb, ptbxl_all, ptbxl_sub, ptbxl_super, chapman, ningbo, sph, cpsc2018, cpsc_extra, echonext, georgia, code15_diag, code_test, zzu_pecg
-LEARNING_RATE=0.001
-BATCH_SIZE=64
+EVAL_MODE="linear"      # finetuning_linear, frozen, linear
+MODEL="camel"           # ecg_founder, ecg_jepa_multiblock, st_mem, merl_resnet, camel, ecgfm_ked, s4, net1d, cpc, hubert_ecg_base
+DATASET="georgia"       # mimic, ptb, ptbxl_all, ptbxl_sub, ptbxl_super, chapman, ningbo, sph, cpsc2018, cpsc_extra, echonext, georgia, code15_diag, zzu_pecg
+LEARNING_RATE=0.0005
+BATCH_SIZE=16
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASE_DIR="${BASE_DIR:-$SCRIPT_DIR}"
+DATASET_DIR="${DATASET_DIR:-${BASE_DIR}/processed}"
+
+usage() {
+    echo "Usage: $0 [--dataset DATASET] [--bootstrap-iterations N]"
+    echo "Example: $0 --dataset mimic --bootstrap-iterations 5"
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dataset)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --dataset requires a value."
+                usage
+                exit 1
+            fi
+            DATASET="$2"
+            shift 2
+            ;;
+        --dataset=*)
+            DATASET="${1#*=}"
+            shift
+            ;;
+        --bootstrap-iterations)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: --bootstrap-iterations requires a value."
+                usage
+                exit 1
+            fi
+            BOOTSTRAP_ITERATIONS="$2"
+            shift 2
+            ;;
+        --bootstrap-iterations=*)
+            BOOTSTRAP_ITERATIONS="${1#*=}"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Error: Unknown argument '$1'."
+            usage
+            exit 1
+            ;;
+    esac
+done
 
 
 if [ "$EVAL_MODE" == "finetuning_linear" ]; then
@@ -38,14 +88,25 @@ else
     exit 1
 fi
 
-module load hpc-env/13.1 CUDA/12.4.0 Anaconda3 git
-conda activate lightning3
+if command -v module >/dev/null 2>&1; then
+    module load hpc-env/13.1 CUDA/12.4.0 Anaconda3 git
+fi
+
+if [[ "${CONDA_DEFAULT_ENV:-}" != "lightning3" ]]; then
+    if command -v conda >/dev/null 2>&1; then
+        eval "$(conda shell.bash hook)"
+        conda activate lightning3
+    else
+        echo "Warning: conda command not found; continuing with current Python environment."
+    fi
+fi
 
 mkdir -p "${LOGS_DIR}/${MODEL}"
 mkdir -p "${OUTPUT_DIR}/${MODEL}_${DATASET}"
 mkdir -p "${PREDICTIONS_DIR}/${MODEL}"
 
-LOG_FILE="${LOGS_DIR}/${MODEL}/${DATASET}_${SLURM_JOB_ID}.log"
+JOB_ID="${SLURM_JOB_ID:-local}"
+LOG_FILE="${LOGS_DIR}/${MODEL}/${DATASET}_${JOB_ID}.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # Special handling per dataset
@@ -88,7 +149,7 @@ case $DATASET in
     ;;
   "chapman")
     ARGS_DATASET+=(
-        "--data ${DATASET_DIR}/chapman/ECGData"
+        "--data ${DATASET_DIR}/chapman"
         "--fs-data 500"
         "--finetune-dataset chapman"
     )
@@ -100,7 +161,7 @@ case $DATASET in
         "--finetune-dataset sph"
     )
     ;;
-  "code15_diag")
+  "code15"|"code15_diag")
     ARGS_DATASET+=(
         "--data ${DATASET_DIR}/code15"
         "--fs-data 400"
@@ -148,7 +209,11 @@ case $DATASET in
         "--fs-data 500"
         "--finetune-dataset zzu_pecg"
     )
-    ;;      
+    ;;
+  *)
+    echo "Error: Unknown dataset '$DATASET'."
+    exit 1
+    ;;
 esac
 
 # Special handling per model
@@ -198,6 +263,15 @@ case $MODEL in
         "--fs-model 500"
         "--input-channels 12"
         "--pretrained ${CHECKPOINTS_DIR}/merl/res18_best_encoder.pth"
+    )
+    ;;
+  "camel")
+    ARGS_MODEL+=(
+        "--architecture camel"
+        "--input-size 10" 
+        "--fs-model 256"
+        "--input-channels 12"
+        "--pretrained ${CAMEL_PRETRAINED}"
     )
     ;;
   "ecgfm_ked")
@@ -271,4 +345,5 @@ python ${BASE_DIR}/code/main_lite.py \
   --eval-mode ${EVAL_MODE} \
   --output-path "${OUTPUT_DIR}/${MODEL}_${DATASET}" \
   --prediction-path "${PREDICTIONS_DIR}/${MODEL}" \
-  --export-predictions \
+  --bootstrap-iterations 5
+  ${ARGS_EXTRA[@]}

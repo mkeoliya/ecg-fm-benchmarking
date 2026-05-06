@@ -91,7 +91,7 @@ class Main_Lite(lp.LightningModule):
     def eval_scores(self, targs,preds,classes=None,bootstrap=False):
         _,_,res = multiclass_roc_curve(targs,preds,classes=classes)
         if(bootstrap):
-            point,low,high,_ = empirical_bootstrap((targs,preds), mcrc_flat, n_iterations=1000,score_fn_kwargs={"classes":classes})
+            point,low,high,_ = empirical_bootstrap((targs,preds), mcrc_flat, n_iterations=getattr(self.hparams, "bootstrap_iterations", 0),score_fn_kwargs={"classes":classes})
             res2={}
             for i,k in enumerate(res.keys()):
                 res2[k]=point[i]
@@ -113,15 +113,17 @@ class Main_Lite(lp.LightningModule):
             
             preds_all = preds_all.numpy()
             targs_all = targs_all.numpy()
+            bootstrap = test and getattr(self.hparams, "bootstrap_iterations", 0) > 0
+
             #instance level score
-            res = self.eval_scores(targs_all,preds_all,classes=self.lbl_itos,bootstrap=test)
+            res = self.eval_scores(targs_all,preds_all,classes=self.lbl_itos,bootstrap=bootstrap)
             res = {k+"_auc_noagg_"+("test" if test else "val")+str(dataloader_idx):v for k,v in res.items()}
             res = {k.replace("(","_").replace(")","_"):v for k,v in res.items()}#avoid () for mlflow
             self.log_dict(res)
             print("epoch",self.current_epoch,"test" if test else "val","noagg:",res["macro_auc_noagg_"+("test" if test else "val")+str(dataloader_idx)])#,"agg:",res_agg)
             
             preds_all_agg,targs_all_agg = self.val_datasets[0].aggregate_predictions(preds_all,targs_all,self.test_idmaps[dataloader_idx] if test else self.val_idmaps[dataloader_idx],aggregate_fn=np.mean)
-            res_agg = self.eval_scores(targs_all_agg,preds_all_agg,classes=self.lbl_itos,bootstrap=test)
+            res_agg = self.eval_scores(targs_all_agg,preds_all_agg,classes=self.lbl_itos,bootstrap=bootstrap)
             res_agg = {k+"_auc_agg_"+("test" if test else "val")+str(dataloader_idx):v for k,v in res_agg.items()}
             res_agg = {k.replace("(","_").replace(")","_"):v for k,v in res_agg.items()}
             self.log_dict(res_agg)
@@ -474,6 +476,7 @@ def add_application_specific_args(parser):
     parser.add_argument("--export-predictions", action="store_true", help="Export predictions in npz format")
     parser.add_argument('--prediction-path', default='.', type=str, dest="prediction_path", help='prediction path')
     parser.add_argument("--eval-mode", type=str, help="finetuning_linear/finetuning_nonlinear/frozen/linear", default="finetuning_linear")
+    parser.add_argument("--bootstrap-iterations", type=int, default=0, help="Number of bootstrap resamples for test confidence intervals; 0 disables bootstrapping")
 
     # Label Efficiency hyperparamters
     parser.add_argument("--label-ratio", type=float, default=1, help="ratio forl label efficiency")

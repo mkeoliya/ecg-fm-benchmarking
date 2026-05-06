@@ -617,6 +617,85 @@ class MerlWrapper(FMWrapperBase):
 
         return torch.nan_to_num(x)
 
+class CAMELWrapper(FMWrapperBase):
+    def __init__(self, num_classes, num_output_tokens, pretrained_path=None, eval_mode="linear", lr=1e-3, discriminative_lr_factor=0.1):
+        super().__init__(num_classes, num_output_tokens)
+        import sys
+        sys.path.append("/home/nvelingker/seewon/CAMEL/src")
+        from training.llm.inference2 import OurModel
+        assert eval_mode in ["linear"]
+        
+        self.eval_mode = eval_mode
+        self.lr = lr
+        self.feature_dim = 2560
+        self.probe_layer_idx = -1
+        self.device = torch.device("cuda")
+        self.discriminative_lr_factor = discriminative_lr_factor
+        
+        self.model = OurModel(
+            device=self.device,
+            model_config_name='medgemma-4b-it',
+            conv_ckpt=None,
+            adapter_ckpt=pretrained_path,
+            no_lora=False)
+        
+        # Nonlinear head configurations
+        nonlinear_head_config = LearnableQueryAttentionPoolingHeadConfig(
+            multi_prediction=False,
+            heads=16,
+            bias=False
+        )
+        
+        @dataclass
+        class InputShape:
+            channels: int
+            length: int
+            static_dim: int
+
+        input_shape = InputShape(channels=self.feature_dim, length=0, static_dim=0)
+        self.nonlinear_head = LearnableQueryAttentionPoolingHead(
+            hparams_head=nonlinear_head_config,
+            hparams_input_shape=input_shape,
+            target_dim=num_classes
+        )
+
+        if self.eval_mode == "finetuning_linear":
+            self.head = nn.Linear(self.feature_dim, num_classes)
+        elif self.eval_mode == "finetuning_nonlinear":
+            self.head = self.nonlinear_head
+        elif self.eval_mode == "frozen":
+            self.head = self.nonlinear_head
+            for p in self.model.parameters():
+                p.requires_grad = False
+            self.model.eval()     
+        else:
+            self.head = nn.Linear(self.feature_dim, num_classes).to(self.device)
+            for p in self.model.wrapper.parameters():
+                p.requires_grad = False
+            self.model.wrapper.eval()
+    
+    def get_params(self):
+        """The following code is only applicable for CAMEL architecture"""
+        head_params = list(self.head.parameters())
+
+        if self.eval_mode in ["frozen", "linear"]:
+            return [{"params": head_params, "lr": self.lr}]
+
+    def initialize_embeddings(self, x, input_text=None):
+        x = torch.nan_to_num(x)
+        x = x.reshape(x.shape[0], -1, 256)
+        x = self.model.probe(
+            x,
+            input_text=input_text,
+            device=self.device,
+            enable_grad=False,
+            layer_index=self.probe_layer_idx,
+        )
+        return x
+
+    def forward(self, x, **kwargs):
+        x = self.head(x.to(torch.float32))
+        return torch.nan_to_num(x)
 
 class EcgFmKEDWrapper(FMWrapperBase):
     """

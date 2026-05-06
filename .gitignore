@@ -1,3 +1,6 @@
 data/*
 processed/
-ptb/
+
+mlruns
+linear
+checkpoints
