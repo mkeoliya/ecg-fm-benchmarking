@@ -17,9 +17,10 @@ CAMEL_PRETRAINED="${CAMEL_PRETRAINED:-/srv/shared_home/common-data/arpa-h/ca/mod
 
 EVAL_MODE="linear"      # finetuning_linear, frozen, linear
 MODEL="camel"           # ecg_founder, ecg_jepa_multiblock, st_mem, merl_resnet, camel, ecgfm_ked, s4, net1d, cpc, hubert_ecg_base
-DATASET="georgia"       # mimic, ptb, ptbxl_all, ptbxl_sub, ptbxl_super, chapman, ningbo, sph, cpsc2018, cpsc_extra, echonext, georgia, code15_diag, zzu_pecg
+DATASET="ptb"           # mimic, ptb, ptbxl_all, ptbxl_sub, ptbxl_super, chapman, ningbo, sph, cpsc2018, cpsc_extra, echonext, georgia, code15_diag, zzu_pecg
 LEARNING_RATE=0.0005
 BATCH_SIZE=16
+BOOTSTRAP_ITERATIONS="${BOOTSTRAP_ITERATIONS:-1000}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="${BASE_DIR:-$SCRIPT_DIR}"
@@ -27,7 +28,7 @@ DATASET_DIR="${DATASET_DIR:-${BASE_DIR}/processed}"
 
 usage() {
     echo "Usage: $0 [--dataset DATASET] [--bootstrap-iterations N]"
-    echo "Example: $0 --dataset mimic --bootstrap-iterations 5"
+    echo "Example: $0 --dataset mimic --bootstrap-iterations 1000"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -345,5 +346,5 @@ python ${BASE_DIR}/code/main_lite.py \
   --eval-mode ${EVAL_MODE} \
   --output-path "${OUTPUT_DIR}/${MODEL}_${DATASET}" \
   --prediction-path "${PREDICTIONS_DIR}/${MODEL}" \
-  --bootstrap-iterations 5
+  --bootstrap-iterations "${BOOTSTRAP_ITERATIONS}" \
   ${ARGS_EXTRA[@]}
