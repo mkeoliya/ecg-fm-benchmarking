@@ -830,7 +830,7 @@ class EcgFmKEDWrapper(FMWrapperBase):
 
 
 class CPCWrapper(FMWrapperBase):
-    def __init__(self, num_classes, num_output_tokens, config_path=None, dataset_path=None, dataset_name=None, eval_mode="finetuning_linear", lr=1e-3, discriminative_lr_factor=0.1):
+    def __init__(self, num_classes, num_output_tokens, config_path=None, dataset_path=None, dataset_name=None, data_backend="npz", eval_mode="finetuning_linear", lr=1e-3, discriminative_lr_factor=0.1):
         super().__init__(num_classes, num_output_tokens)
         from clinical_ts.models.ecg_foundation_models.ecg_cpc.basic_io import load_model_from_config
 
@@ -853,6 +853,7 @@ class CPCWrapper(FMWrapperBase):
         overrides = [
             f"data0.name={dataset_name}",
             f"data0.path={dataset_path.as_posix()}",
+            f"data0.data_backend={data_backend}",
             f"trainer.pretrained='{checkpoint_path.as_posix()}'",
         ]
 

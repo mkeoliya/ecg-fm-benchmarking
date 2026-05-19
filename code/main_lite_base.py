@@ -30,6 +30,7 @@ from clinical_ts.utils.schedulers import (
 )
 
 from clinical_ts.data.time_series_dataset import TimeSeriesDataset
+from clinical_ts.data.time_series_dataset_utils import load_wfdb_dataset
 # Utility function
 
 def multihot_encode(x, num_classes):
@@ -460,7 +461,9 @@ class Main_Lite(lp.LightningModule):
             self.reset_eval_buffers()
             return
 
-        input_size_data = int(self.hparams.input_size*self.hparams.fs_data)
+        raw_wfdb = self.hparams.data_backend == "wfdb"
+        sample_fs = self.hparams.fs_data
+        input_size_data = int(self.hparams.input_size*sample_fs)
         chunkify_train = self.hparams.chunkify_train
         chunk_length_train = int(self.hparams.chunk_length_train*input_size_data) if chunkify_train else 0
         stride_train = int(self.hparams.stride_fraction_train*input_size_data)
@@ -474,28 +477,33 @@ class Main_Lite(lp.LightningModule):
         self.ds_std = None
         self.lbl_itos = None
         for i,target_folder in enumerate(list(self.hparams.data.split(","))):
-            target_folder = Path(target_folder)           
-            df_mapped, lbl_itos,  mean, std = load_dataset(target_folder)
-            df_mapped, lbl_itos,  mean, std = self.setup_dataset(target_folder, df_mapped, lbl_itos, mean, std)
-            print("Folder:",target_folder,"Samples:",len(df_mapped))
+            target_folder = Path(target_folder)
+            tfms_lst = []
+            if raw_wfdb:
+                df_train, df_val, df_test, lbl_itos, mean, std = load_wfdb_dataset(str(target_folder), data_fs=self.hparams.fs_data)
+            else:
+                df_mapped, lbl_itos,  mean, std = load_dataset(target_folder, df_filename="df_memmap.pkl")
+                df_mapped, lbl_itos,  mean, std = self.setup_dataset(target_folder, df_mapped, lbl_itos, mean, std)
+                print("Folder:",target_folder,"Samples:",len(df_mapped))
+                max_fold_id = df_mapped.strat_fold.max()
+                df_train = df_mapped[df_mapped.strat_fold<max_fold_id-1]
+                df_val = df_mapped[df_mapped.strat_fold==max_fold_id-1]
+                df_test = df_mapped[df_mapped.strat_fold==max_fold_id]
+
+            if (self.hparams.fs_model != self.hparams.fs_data):
+                tfms_lst.append(Resample(self.hparams.fs_data, self.hparams.fs_model))
             if(self.lbl_itos is None):
                 self.lbl_itos = lbl_itos
             if self.ds_mean is None:
                 self.ds_mean = mean
                 self.ds_std = std
-            tfms_lst = []
-            if(self.hparams.fs_model != self.hparams.fs_data):
-                tfms_lst.append(Resample(self.hparams.fs_data, self.hparams.fs_model))
             if self.hparams.normalize:
                 tfms_lst.append(Normalize(self.ds_mean, self.ds_std))
             if hasattr(self.model, 'get_model_transforms'):
                 tfms_lst = self.model.get_model_transforms(tfms_lst)
             tfms_lst.append(ToTensor())
             tfms = tfms_lst[0] if len(tfms_lst)==1 else transforms.Compose(tfms_lst)
-            max_fold_id = df_mapped.strat_fold.max()
-            df_train = df_mapped[df_mapped.strat_fold<max_fold_id-1]
-            df_val = df_mapped[df_mapped.strat_fold==max_fold_id-1]
-            df_test = df_mapped[df_mapped.strat_fold==max_fold_id]
+
             dataset_config_train = TimeSeriesDatasetConfig(
                 df=df_train,
                 output_size=input_size_data,
@@ -505,7 +513,11 @@ class Main_Lite(lp.LightningModule):
                 stride=stride_train,
                 transforms=tfms,
                 col_lbl="label",
-                memmap_filename=target_folder/("memmap.npy"))
+                memmap_filename=None if raw_wfdb else target_folder/("memmap.npy"),
+                raw_wfdb=raw_wfdb,
+                raw_wfdb_target_fs=self.hparams.fs_data,
+                raw_wfdb_channels=self.hparams.input_channels,
+                raw_wfdb_clip_amp=None)
             
             train_datasets.append(TimeSeriesDataset(dataset_config_train))
             dataset_config_val = dataclasses.replace(dataset_config_train)
@@ -535,30 +547,32 @@ class Main_Lite(lp.LightningModule):
             self.val_datasets = val_datasets
             self.test_datasets = test_datasets
 
-        print("\nPrecomputing embeddings...")
-        
-        # Precompute train embeddings
-        train_emb, train_lbl = self.precompute_embeddings(self.train_dataset, desc="train embeddings")
-        self.train_dataset = EmbeddingDataset(train_emb, train_lbl)
-        print(f"Train embeddings: {train_emb.shape}")
-        
-        # Precompute val embeddings
-        val_embedding_datasets = []
-        for i, val_ds in enumerate(self.val_datasets):
-            val_emb, val_lbl = self.precompute_embeddings(val_ds, desc=f"val embeddings {i}")
-            val_embedding_datasets.append(EmbeddingDataset(val_emb, val_lbl))
-            print(f"Val dataset {i} embeddings: {val_emb.shape}")
-        self.val_datasets = val_embedding_datasets
-        
-        # Precompute test embeddings
-        test_embedding_datasets = []
-        for i, test_ds in enumerate(self.test_datasets):
-            test_emb, test_lbl = self.precompute_embeddings(test_ds, desc=f"test embeddings {i}")
-            test_embedding_datasets.append(EmbeddingDataset(test_emb, test_lbl))
-            print(f"Test dataset {i} embeddings: {test_emb.shape}")
-        self.test_datasets = test_embedding_datasets
+        self.using_precomputed_embeddings = hasattr(self.model, "initialize_embeddings")
+        if self.using_precomputed_embeddings:
+            print("\nPrecomputing embeddings...")
+            
+            # Precompute train embeddings
+            train_emb, train_lbl = self.precompute_embeddings(self.train_dataset, desc="train embeddings")
+            self.train_dataset = EmbeddingDataset(train_emb, train_lbl)
+            print(f"Train embeddings: {train_emb.shape}")
+            
+            # Precompute val embeddings
+            val_embedding_datasets = []
+            for i, val_ds in enumerate(self.val_datasets):
+                val_emb, val_lbl = self.precompute_embeddings(val_ds, desc=f"val embeddings {i}")
+                val_embedding_datasets.append(EmbeddingDataset(val_emb, val_lbl))
+                print(f"Val dataset {i} embeddings: {val_emb.shape}")
+            self.val_datasets = val_embedding_datasets
+            
+            # Precompute test embeddings
+            test_embedding_datasets = []
+            for i, test_ds in enumerate(self.test_datasets):
+                test_emb, test_lbl = self.precompute_embeddings(test_ds, desc=f"test embeddings {i}")
+                test_embedding_datasets.append(EmbeddingDataset(test_emb, test_lbl))
+                print(f"Test dataset {i} embeddings: {test_emb.shape}")
+            self.test_datasets = test_embedding_datasets
 
-        self.embeddings_precomputed = True
+            self.embeddings_precomputed = True
         self.reset_eval_buffers()
 
     def embedding_collate_fn(self, batch):
@@ -566,14 +580,18 @@ class Main_Lite(lp.LightningModule):
         labels = torch.stack([b['label'] for b in batch])
         return {"embedding": embeddings, "label": labels}
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.hparams.batch_size, collate_fn=self.embedding_collate_fn, num_workers=0, shuffle=True, drop_last=True)
+        collate_fn = self.embedding_collate_fn if getattr(self, "using_precomputed_embeddings", False) else tsdata_collate_fn
+        return DataLoader(self.train_dataset, batch_size=self.hparams.batch_size, collate_fn=collate_fn, num_workers=0, shuffle=True, drop_last=True)
     def val_dataloader(self):
-        return [DataLoader(ds, batch_size=self.hparams.batch_size, collate_fn=self.embedding_collate_fn, num_workers=0) for ds in self.val_datasets]
+        collate_fn = self.embedding_collate_fn if getattr(self, "using_precomputed_embeddings", False) else tsdata_collate_fn
+        return [DataLoader(ds, batch_size=self.hparams.batch_size, collate_fn=collate_fn, num_workers=0) for ds in self.val_datasets]
     def test_dataloader(self):
-        return [DataLoader(ds, batch_size=self.hparams.batch_size, collate_fn=self.embedding_collate_fn, num_workers=0) for ds in self.test_datasets]
+        collate_fn = self.embedding_collate_fn if getattr(self, "using_precomputed_embeddings", False) else tsdata_collate_fn
+        return [DataLoader(ds, batch_size=self.hparams.batch_size, collate_fn=collate_fn, num_workers=0) for ds in self.test_datasets]
 
     def _step(self,data_batch, batch_idx, train, test=False, dataloader_idx=0):
-        preds_all = self.forward(data_batch["embedding"])
+        model_input = data_batch["embedding"] if "embedding" in data_batch else data_batch["seq"]
+        preds_all = self.forward(model_input)
         loss = self.criterion(preds_all, data_batch["label"].float())
         
         if(not train and not test):

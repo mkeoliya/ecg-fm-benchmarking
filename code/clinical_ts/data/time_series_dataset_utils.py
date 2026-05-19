@@ -7,7 +7,7 @@ import pandas as pd
 
 from pathlib import Path
 from scipy.stats import iqr
-
+import wfdb
 
 #workaround for windows pickles
 from sys import platform
@@ -22,6 +22,67 @@ except ImportError as e:
 
 from tqdm.auto import tqdm
 import os
+
+from clinical_ts.utils.signal_utils import resample_data, fix_nans_and_clip, channel_stoi_default, channel_stoi_canonical
+ROOT_DIR = '/srv/shared_home/common-data/arpa-h/ca/'
+    
+def load_split(df, dataset_dir, data_fs):
+    new_data = []
+    for _, row in df.iterrows():
+        record_path = os.path.join(ROOT_DIR, dataset_dir, str((int(row['ecg_id'].split('_')[0]) // 1000) * 1000).zfill(5), row['ecg_id'], row['ecg_id'])
+        new_data.append({
+            'data': record_path,
+            'data_length': int(10 * data_fs),
+            'label': row.values[2:].astype(np.float32)
+        })
+    new_data = pd.DataFrame(new_data)
+    return new_data
+
+def load_wfdb_dataset(dataset, data_fs=500):
+    base_dataset = str(dataset).split('processed/')[-1]
+    if 'ptb-xl' in base_dataset:
+        dataset_dir = 'ptbxl/records500'
+        dataset = 'ptbxl_super'
+    else:
+        raise NotImplementedError(f"WFDB loading is not configured for dataset path: {dataset}")
+
+    train_df = pd.read_csv(os.path.join(ROOT_DIR, 'ecg-fm', f'{dataset}_train.csv'))
+    test_df = pd.read_csv(os.path.join(ROOT_DIR, 'ecg-fm', f'{dataset}_test.csv'))
+    val_df = pd.read_csv(os.path.join(ROOT_DIR, 'ecg-fm', f'{dataset}_val.csv'))
+
+    df_train = load_split(train_df, dataset_dir, data_fs=data_fs)
+    df_test = load_split(test_df, dataset_dir, data_fs=data_fs)
+    df_val = load_split(val_df, dataset_dir, data_fs=data_fs)
+
+    lbl_itos = np.array(train_df.columns[2:])
+    mean = None
+    std = None
+
+    return df_train, df_val, df_test, lbl_itos, mean, std
+
+def _load_wfdb_record(record_path, start_idx_crop, end_idx_crop, raw_wfdb_metadata=None, raw_wfdb_fix_nans=False, raw_wfdb_clip_amp=3, raw_wfdb_target_fs=240, raw_wfdb_channels=12):
+    sigbufs, header = wfdb.rdsamp(str(record_path), sampfrom=start_idx_crop, sampto=end_idx_crop)
+    if np.any(np.isnan(sigbufs)):
+        if raw_wfdb_fix_nans:
+            fix_nans_and_clip(sigbufs, clip_amp=0 if raw_wfdb_clip_amp is None else raw_wfdb_clip_amp)
+        else:
+            sigbufs = np.nan_to_num(sigbufs, nan=0.0)
+    elif raw_wfdb_clip_amp is not None:
+        sigbufs = np.clip(sigbufs, a_min=-raw_wfdb_clip_amp, a_max=raw_wfdb_clip_amp)
+
+    data = resample_data(
+        sigbufs=sigbufs,
+        channel_stoi=channel_stoi_canonical,
+        channel_labels=header["sig_name"],
+        fs=raw_wfdb_target_fs,
+        target_fs=raw_wfdb_target_fs,
+        channels=raw_wfdb_channels,
+    )
+    # data = data[start_idx_crop:end_idx_crop]
+    #if len(data) < output_size:
+    #    pad_width = [(0, output_size - len(data))] + [(0, 0)] * (data.ndim - 1)
+    #    data = np.pad(data, pad_width, mode="constant")
+    return data
 
 def check_and_clean_numpy_files(directory):
     """
@@ -101,34 +162,38 @@ def save_dataset(df,lbl_itos=None,mean=None,std=None,target_root=".",df_filename
     if(std is not None):
         np.save(target_root/("std.npy"),std)
 
-def load_dataset(target_root,df_filename="df_memmap.pkl"):
-    target_root = Path(target_root)
-    df_path = target_root / df_filename
-    if not df_path.exists() and df_filename == "df_memmap.pkl":
-        df_path = target_root / "df.pkl"
-    if not df_path.exists():
-        raise FileNotFoundError(f"Dataset metadata file not found: {df_path}")
+def load_dataset(target_root, df_filename="df_memmap.pkl"):
+    try:
+        target_root = Path(target_root)
+        df_path = target_root / df_filename
+        if not df_path.exists() and df_filename == "df_memmap.pkl":
+            df_path = target_root / "df.pkl"
+        if not df_path.exists():
+            raise FileNotFoundError(f"Dataset metadata file not found: {df_path}")
 
-    df = pd.read_pickle(df_path)
-    
-    if((target_root/("lbl_itos.pkl")).exists()):#dict as pickle
-        infile = open(target_root/("lbl_itos.pkl"), "rb")
-        lbl_itos=pickle.load(infile)
-        infile.close()
-    elif((target_root/("lbl_itos.npy")).exists()):
-        lbl_itos = np.load(target_root/("lbl_itos.npy"))
-    else:#array
-        lbl_itos = None
+        df = pd.read_pickle(df_path)
+        
+        if((target_root/("lbl_itos.pkl")).exists()):#dict as pickle
+            infile = open(target_root/("lbl_itos.pkl"), "rb")
+            lbl_itos=pickle.load(infile)
+            infile.close()
+        elif((target_root/("lbl_itos.npy")).exists()):
+            lbl_itos = np.load(target_root/("lbl_itos.npy"))
+        else:#array
+            lbl_itos = None
 
-    if((target_root/("mean.npy")).exists()):
-        mean = np.load(target_root/("mean.npy"))
-    else:
-        mean = None
-    if((target_root/("std.npy")).exists()):
-        std = np.load(target_root/("std.npy"))
-    else:
-        std = None
-    return df, lbl_itos, mean, std
+        if((target_root/("mean.npy")).exists()):
+            mean = np.load(target_root/("mean.npy"))
+        else:
+            mean = None
+        if((target_root/("std.npy")).exists()):
+            std = np.load(target_root/("std.npy"))
+        else:
+            std = None
+        return df, lbl_itos, mean, std
+    except:
+        df_train, df_val, df_test, lbl_itos, mean, std  = load_wfdb_dataset(str(target_root))
+        return pd.concat([df_train, df_val, df_test]), lbl_itos, mean, std
 
 def dataset_add_chunk_col(df, col="data"):
     '''add a chunk column to the dataset df'''

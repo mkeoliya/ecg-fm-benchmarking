@@ -112,6 +112,7 @@ class BaseConfigData:
     _target_:str = "clinical_ts.models.ecg_foundation_models.ecg_cpc.config.BaseConfigData" # just used to filter out data configs from kwargs
     name:str = "" # dataset name (only for supervised training during preprocessing)
     path:str = "" # path to dataset
+    data_backend:str = "npz" # npz: preprocessed memmap/df files, wfdb: raw WFDB-backed metadata
     df_filename:str = "df_memmap.pkl" # filename of dataframe
     path_label:str= "" # separate path to annotations (by default will be inferred from path)
     fs:float = 100. # input sampling frequency

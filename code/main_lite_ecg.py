@@ -234,6 +234,7 @@ class Main_Lite_ECG(Main_Lite):
                 config_path=hparams.pretrained,
                 dataset_path=hparams.data,
                 dataset_name=hparams.finetune_dataset,
+                data_backend=hparams.data_backend,
                 eval_mode=hparams.eval_mode,
                 lr=self.lr,
                 discriminative_lr_factor=hparams.discriminative_lr_factor

@@ -23,7 +23,8 @@ class ECGModel(SSLModel):
                 return res
         
         #specific for PTB-XL
-        if(self.hparams.loss.loss_type=="supervised" and dataset_kwargs.name.startswith("ptbxl")):    
+        data_backend = getattr(dataset_kwargs, "data_backend", "npz")
+        if(self.hparams.loss.loss_type=="supervised" and dataset_kwargs.name.startswith("ptbxl") and data_backend == 'npz'):    
             if(dataset_kwargs.name=="ptbxl_super"):
                 ptb_xl_label = "label_diag_superclass"#check filtered
             elif(dataset_kwargs.name=="ptbxl_sub"):

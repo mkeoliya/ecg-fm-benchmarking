@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.utils.data
 from clinical_ts.data.time_series_dataset_transforms import Compose
-from clinical_ts.data.time_series_dataset_utils import MEMMAP_META_VERSION
+from clinical_ts.data.time_series_dataset_utils import MEMMAP_META_VERSION, _load_wfdb_record
 from packaging import version
 
 #Note: due to issues with the numpy rng for multiprocessing (https://github.com/pytorch/pytorch/issues/5059) that could be fixed by a custom worker_init_fn we use random throught for convenience
@@ -130,8 +130,9 @@ class TimeSeriesDataset(torch.utils.data.Dataset):
         """
         super().__init__()
         assert not((hparams.memmap_filename is not None) and (hparams.npy_data is not None))
+        assert not(hparams.raw_wfdb and (hparams.memmap_filename is not None or hparams.npy_data is not None))
         # require integer entries if using memmap or npy
-        assert (hparams.memmap_filename is None and hparams.npy_data is None) or (hparams.df[hparams.col_data].dtype==np.int64 or hparams.df[hparams.col_data].dtype==np.int32 or hparams.df[hparams.col_data].dtype==np.int16)
+        assert hparams.raw_wfdb or (hparams.memmap_filename is None and hparams.npy_data is None) or (hparams.df[hparams.col_data].dtype==np.int64 or hparams.df[hparams.col_data].dtype==np.int32 or hparams.df[hparams.col_data].dtype==np.int16)
         # keys (in column data) have to be unique
         assert(hparams.allow_multiple_keys or len(hparams.df[hparams.col_data].unique())==len(hparams.df))
 
@@ -179,7 +180,14 @@ class TimeSeriesDataset(torch.utils.data.Dataset):
         self.fs_annotation_over_fs_data = hparams.fs_annotation_over_fs_data
         self.return_idxs = hparams.return_idxs
         
-        if(hparams.memmap_filename is not None):
+        if(hparams.raw_wfdb):
+            self.mode = "wfdb"
+            self.raw_wfdb_metadata = hparams.df[hparams.raw_wfdb_metadata_col].to_numpy(dtype=object) if hparams.raw_wfdb_metadata_col in hparams.df.columns else None
+            self.raw_wfdb_target_fs = hparams.raw_wfdb_target_fs
+            self.raw_wfdb_channels = hparams.raw_wfdb_channels
+            self.raw_wfdb_fix_nans = hparams.raw_wfdb_fix_nans
+            self.raw_wfdb_clip_amp = hparams.raw_wfdb_clip_amp
+        elif(hparams.memmap_filename is not None):
             self.memmap_meta_filename = pathlib.Path(hparams.memmap_filename).parent/(hparams.memmap_filename.stem+"_meta.npz")
             self.mode="memmap"
             memmap_meta = np.load(self.memmap_meta_filename, allow_pickle=True)
@@ -221,6 +229,8 @@ class TimeSeriesDataset(torch.utils.data.Dataset):
 
         for df_idx,(id,row) in enumerate(hparams.df.iterrows()):
             if(self.mode=="files"):
+                data_length = row["data_length"]
+            elif(self.mode=="wfdb"):
                 data_length = row["data_length"]
             elif(self.mode=="memmap"):
                 data_length= self.memmap_length[row[hparams.col_data]]
@@ -316,6 +326,19 @@ class TimeSeriesDataset(torch.utils.data.Dataset):
                 label = np.load(label_filename, allow_pickle=True)[start_idx_crop_label:end_idx_crop_label] #data type has to be adjusted when saving to npy
             else:
                 label = self.timeseries_df_label[df_idx] #input type has to be adjusted in the dataframe
+        elif(self.mode=="wfdb"):
+            data_filename = self.timeseries_df_data[df_idx]
+            data = _load_wfdb_record(
+                data_filename,
+                start_idx_crop,
+                end_idx_crop,
+                raw_wfdb_metadata=None if self.raw_wfdb_metadata is None else self.raw_wfdb_metadata[df_idx],
+                raw_wfdb_fix_nans=self.raw_wfdb_fix_nans,
+                raw_wfdb_clip_amp=self.raw_wfdb_clip_amp,
+                raw_wfdb_target_fs=self.raw_wfdb_target_fs,
+                raw_wfdb_channels=self.raw_wfdb_channels,
+            )
+            label = self.timeseries_df_label[df_idx]
         elif(self.mode=="memmap"): #from one memmap file
             memmap_idx = self.timeseries_df_data[df_idx] #grab the actual index (Note the df to create the ds might be a subset of the original df used to create the memmap)
             memmap_file_idx = self.memmap_file_idx[memmap_idx]
@@ -463,3 +486,9 @@ class TimeSeriesDatasetConfig:
     fs_annotation_over_fs_data:float=1.
     return_idxs:bool=False
     allow_multiple_keys:bool=False #in the df allow multiple rows with identical IDs
+    raw_wfdb:bool=False
+    raw_wfdb_target_fs:float=240.
+    raw_wfdb_channels:int=12
+    raw_wfdb_metadata_col:str="wfdb_metadata"
+    raw_wfdb_fix_nans:bool=False
+    raw_wfdb_clip_amp:Union[float,None]=3.
