@@ -419,6 +419,7 @@ def add_default_args():
     parser.add_argument("--precision", type=str, default="16-mixed", help="32,16-mixed,bf16-mixed")
     parser.add_argument("--distributed-backend", dest="distributed_backend", type=str, default=None, help="None/ddp")
     parser.add_argument("--accumulate", type=int, default=1, help="accumulate grad batches (total-bs=accumulate-batches*bs)")
+    parser.add_argument("--num-workers", type=int, default=0, help="number of DataLoader workers")
         
     parser.add_argument("--input-size", dest="input_size", help="input size (in seconds)", type=float, default=2.5)
     parser.add_argument("--train-head-only", action="store_true", help="freeze everything except classification head (note: --linear-eval defaults to no hidden layer in classification head)")
@@ -434,6 +435,10 @@ def add_default_args():
 
     parser.add_argument("--auc-maximization", action="store_true", help="direct auc maximization",  default=False)
     parser.add_argument("--refresh-rate", type=int, help="progress bar refresh rate (0 to disable)", default=0)
+    parser.add_argument("--checkpoint-monitor", type=str, default="",
+                        help="Metric name for ModelCheckpoint. Defaults to dataset-specific validation AUROC/composite score.")
+    parser.add_argument("--checkpoint-mode", type=str, choices=["auto", "min", "max"], default="auto",
+                        help="Optimization direction for --checkpoint-monitor. Use auto for sensible defaults.")
 
     parser.add_argument("--mlflow", action="store_true", help="also log to mlflow")
     parser.add_argument("--mlflow-experiment-name", type=str, default="fm-benchmarking", help="Name of the mlflow experiment")
@@ -441,12 +446,14 @@ def add_default_args():
 
     parser.add_argument("--fs-model", type=float, help="sampling frequency of the model", default=100)
     parser.add_argument("--fs-data", type=float, help="sampling frequency of the dataset", default=100)
+    parser.add_argument("--data-backend", type=str, choices=["wfdb", "npz"], default="npz",
+                        help="wfdb reads raw WFDB records inline; npz uses processed df_memmap.pkl/memmap.npy")
     
     return parser
 
 def add_model_specific_args(parser):
     parser.add_argument("--input-channels", type=int, default=12)
-    parser.add_argument("--architecture", type=str, help="xresnet1d50/xresnet1d101/inception1d/s4", default="xresnet1d50")
+    parser.add_argument("--architecture", type=str, help="ecg_founder/ecg_jepa/st_mem/merl/camel/ecgfm_ked/s4/net1d/cpc/hubert_ecg", default="xresnet1d50")
     
     parser.add_argument("--s4-n", type=int, default=8, help='S4: N (Sashimi default:64)')
     parser.add_argument("--s4-h", type=int, default=512, help='S4: H (Sashimi default:64)')
@@ -477,6 +484,17 @@ def add_application_specific_args(parser):
     parser.add_argument('--prediction-path', default='.', type=str, dest="prediction_path", help='prediction path')
     parser.add_argument("--eval-mode", type=str, help="finetuning_linear/finetuning_nonlinear/frozen/linear", default="finetuning_linear")
     parser.add_argument("--bootstrap-iterations", type=int, default=0, help="Number of bootstrap resamples for test confidence intervals; 0 disables bootstrapping")
+    parser.add_argument("--inference-interval-csv", default="", help="Optional CSV path(s), comma-separated, with per-row start/end intervals.")
+    parser.add_argument("--inference-interval-splits", default="test", help="Comma-separated train/val/test/all split list for interval application.")
+    parser.add_argument("--inference-interval-name-col", default="", help="Interval CSV record-name column. Auto-detects record_name/name/NAME when omitted.")
+    parser.add_argument("--inference-interval-target-col", default="", help="Processed dataframe key column. Auto-detects record_name/name/NAME when omitted.")
+    parser.add_argument("--inference-interval-split-col", default="", help="Optional split column in the interval CSV. Auto-detects split when present.")
+    parser.add_argument("--inference-interval-start-sec-col", default="", help="Interval CSV start column in seconds. Auto-detected when omitted.")
+    parser.add_argument("--inference-interval-end-sec-col", default="", help="Interval CSV end column in seconds. Auto-detected when omitted.")
+    parser.add_argument("--inference-interval-start-idx-col", default="", help="Interval CSV start column in sample indices. Overrides seconds when provided.")
+    parser.add_argument("--inference-interval-end-idx-col", default="", help="Interval CSV end column in sample indices. Overrides seconds when provided.")
+    parser.add_argument("--inference-interval-anchor-idx-col", default="", help="Anchor sample-index column for lookback windows. Auto-detects abnormal_start when omitted.")
+    parser.add_argument("--inference-interval-lookback-sec", type=float, default=0, help="If >0, use [anchor-lookback, anchor] inference windows.")
 
     # Label Efficiency hyperparamters
     parser.add_argument("--label-ratio", type=float, default=1, help="ratio forl label efficiency")
@@ -526,14 +544,22 @@ if __name__ == '__main__':
         mlf_logger.log_hyperparams = log_params_from_namespace       
         logger.append(mlf_logger)
 
+    default_checkpoint_monitor = "composite_score_agg_val0" if hparams.finetune_dataset == "mimic" else "macro_auc_agg_val0"
+    checkpoint_monitor = hparams.checkpoint_monitor or default_checkpoint_monitor
+    if hparams.checkpoint_mode == "auto":
+        checkpoint_mode = "min" if checkpoint_monitor.startswith(("composite_score", "mae", "loss")) else "max"
+    else:
+        checkpoint_mode = hparams.checkpoint_mode
+    print("Checkpoint monitor:", checkpoint_monitor, "mode:", checkpoint_mode)
+
     checkpoint_callback = ModelCheckpoint(
         dirpath=logger[0].log_dir,
         filename="best_model",
         save_top_k=1,
 		save_last=True,
         verbose=True,
-        monitor="composite_score_agg_val0" if hparams.finetune_dataset == "mimic" else "macro_auc_agg_val0",
-        mode="min" if hparams.finetune_dataset == "mimic" else "max")
+        monitor=checkpoint_monitor,
+        mode=checkpoint_mode)
 
     lr_monitor = LearningRateMonitor(logging_interval="step")
     #lr_monitor2 = LRMonitorCallback(start=False,end=True)#interval="step")

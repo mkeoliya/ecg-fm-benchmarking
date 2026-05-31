@@ -70,6 +70,9 @@ class Main_Lite_ECG(Main_Lite):
         elif(hparams.finetune_dataset == "zzu_pecg"):
             num_classes = 58
             self.task = "classification_multi"
+        elif(hparams.finetune_dataset in {"binary", "penn_forecast"}):
+            num_classes = 1
+            self.task = "classification_multi"
         elif hparams.finetune_dataset == "ptbxl_label_efficiency":
             num_classes = 5
             self.task = "classification_multi"
@@ -323,6 +326,9 @@ class Main_Lite_ECG(Main_Lite):
             df_mapped = df_mapped[df_mapped["data_length"] >= 5000]
             lbl_itos = np.array(lbl_itos["aha_description_filtered"])
             df_mapped["label"] = df_mapped["aha_description_filtered_numeric"].apply(lambda x: multihot_encode(x, len(lbl_itos)))
+        elif(self.hparams.finetune_dataset in {"binary", "penn_forecast"}):
+            lbl_itos = np.array(lbl_itos)
+            df_mapped["label"] = df_mapped["label"].apply(lambda x: np.array([float(x)], dtype=np.float32))
         elif self.hparams.finetune_dataset == "ptbxl_label_efficiency":
             lbl_itos = np.array(lbl_itos["label_diag_superclass"])
             

@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import dataclasses
 import csv
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from tqdm.auto import tqdm
 
@@ -61,6 +62,37 @@ def regression_flat(targs, preds, metrics=["mae"], target_names=None):
             ordered_values.append(res[f"{target_name}_{metric}"])
 
     return np.array(ordered_values)
+
+def _is_empty_arg(value):
+    return value is None or str(value).strip() == ""
+
+def _resolve_column(columns, explicit, candidates):
+    columns = list(columns)
+    if not _is_empty_arg(explicit):
+        if explicit not in columns:
+            raise ValueError(f"Column {explicit!r} not found. Available columns: {columns}")
+        return explicit
+
+    by_lower = {str(c).lower(): c for c in columns}
+    for candidate in candidates:
+        resolved = by_lower.get(candidate.lower())
+        if resolved is not None:
+            return resolved
+    return None
+
+def _split_values(split_name):
+    if split_name == "val":
+        return {"val", "valid", "validation"}
+    return {split_name}
+
+def _split_requested(split_name, requested):
+    if _is_empty_arg(requested):
+        requested = "test"
+    requested = {item.strip().lower() for item in str(requested).split(",") if item.strip()}
+    return "all" in requested or bool(_split_values(split_name).intersection(requested))
+
+def _csv_paths(value):
+    return [Path(item.strip()) for item in str(value).split(",") if item.strip()]
 
 ####################################################################################################
 # Embedding Dataset for precomputed embeddings
@@ -302,6 +334,10 @@ class Main_Lite(lp.LightningModule):
                 return res, None
             return res
 
+    def eval_auprc_scores(self, targs, preds, classes=None):
+        _, _, res = multiclass_roc_curve(targs, preds, classes=classes, precision_recall=True)
+        return res
+
     def on_valtest_epoch_eval(self, outputs_all, dataloader_idx, test=False):
         preds_all = torch.cat(outputs_all["preds"]).cpu()
         targs_all = torch.cat(outputs_all["targs"]).cpu()
@@ -342,8 +378,18 @@ class Main_Lite(lp.LightningModule):
         else:
             res = {k+"_auc_noagg_"+("test" if test else "val")+str(dataloader_idx):v for k,v in res.items()}
             res = {k.replace("(","_").replace(")","_"):v for k,v in res.items()}
-            print("epoch",self.current_epoch,"test" if test else "val","noagg:",res["macro_auc_noagg_"+("test" if test else "val")+str(dataloader_idx)])
+            auprc = self.eval_auprc_scores(targs_all, preds_all, classes=self.lbl_itos)
+            auprc = {k+"_auprc_noagg_"+("test" if test else "val")+str(dataloader_idx):v for k,v in auprc.items()}
+            auprc = {k.replace("(","_").replace(")","_"):v for k,v in auprc.items()}
+            print(
+                "epoch", self.current_epoch, "test" if test else "val", "noagg auroc:",
+                res["macro_auc_noagg_"+("test" if test else "val")+str(dataloader_idx)],
+                "auprc:",
+                auprc["macro_auprc_noagg_"+("test" if test else "val")+str(dataloader_idx)],
+                flush=True,
+            )
             self.write_bootstrap_results(bootstrap_results, "test" if test else "val", "noagg", dataloader_idx, auc_suffix=True)
+            self.log_dict(auprc)
         self.log_dict(res)
 
         # Aggregated
@@ -365,8 +411,18 @@ class Main_Lite(lp.LightningModule):
         else:            
             res_agg = {k+"_auc_agg_"+("test" if test else "val")+str(dataloader_idx):v for k,v in res_agg.items()}
             res_agg = {k.replace("(","_").replace(")","_"):v for k,v in res_agg.items()}            
-            print("epoch",self.current_epoch,"test" if test else "val","agg:",res_agg["macro_auc_agg_"+("test" if test else "val")+str(dataloader_idx)])
+            auprc_agg = self.eval_auprc_scores(targs_all_agg, preds_all_agg, classes=self.lbl_itos)
+            auprc_agg = {k+"_auprc_agg_"+("test" if test else "val")+str(dataloader_idx):v for k,v in auprc_agg.items()}
+            auprc_agg = {k.replace("(","_").replace(")","_"):v for k,v in auprc_agg.items()}
+            print(
+                "epoch", self.current_epoch, "test" if test else "val", "agg auroc:",
+                res_agg["macro_auc_agg_"+("test" if test else "val")+str(dataloader_idx)],
+                "auprc:",
+                auprc_agg["macro_auprc_agg_"+("test" if test else "val")+str(dataloader_idx)],
+                flush=True,
+            )
             self.write_bootstrap_results(bootstrap_results_agg, "test" if test else "val", "agg", dataloader_idx, auc_suffix=True)
+            self.log_dict(auprc_agg)
         self.log_dict(res_agg)
         
         
@@ -455,6 +511,203 @@ class Main_Lite(lp.LightningModule):
         
         return embeddings, labels
 
+    def apply_inference_intervals(self, df, split_name):
+        interval_csv = getattr(self.hparams, "inference_interval_csv", "")
+        if _is_empty_arg(interval_csv):
+            return df
+        if not _split_requested(split_name, getattr(self.hparams, "inference_interval_splits", "test")):
+            return df
+
+        interval_paths = _csv_paths(interval_csv)
+        missing_paths = [path for path in interval_paths if not path.exists()]
+        if missing_paths:
+            raise FileNotFoundError(f"Inference interval CSV not found: {missing_paths[0]}")
+
+        intervals = pd.concat(
+            [pd.read_csv(path) for path in interval_paths],
+            ignore_index=True,
+        )
+        split_col = _resolve_column(
+            intervals.columns,
+            getattr(self.hparams, "inference_interval_split_col", ""),
+            ["split"],
+        )
+        if split_col is not None:
+            allowed = _split_values(split_name)
+            intervals = intervals[
+                intervals[split_col].astype(str).str.lower().isin(allowed)
+            ].copy()
+
+        source_key = _resolve_column(
+            intervals.columns,
+            getattr(self.hparams, "inference_interval_name_col", ""),
+            ["record_name", "name", "NAME"],
+        )
+        target_key = _resolve_column(
+            df.columns,
+            getattr(self.hparams, "inference_interval_target_col", ""),
+            ["record_name", "name", "NAME"],
+        )
+        if source_key is None or target_key is None:
+            raise ValueError(
+                "Could not resolve interval merge key. Pass "
+                "--inference-interval-name-col and/or --inference-interval-target-col."
+            )
+
+        start_sec_col = _resolve_column(
+            intervals.columns,
+            getattr(self.hparams, "inference_interval_start_sec_col", ""),
+            ["start_sec", "start_seconds", "window_start_sec", "window_start", "start"],
+        )
+        end_sec_col = _resolve_column(
+            intervals.columns,
+            getattr(self.hparams, "inference_interval_end_sec_col", ""),
+            ["end_sec", "end_seconds", "window_end_sec", "window_end", "end"],
+        )
+        start_idx_col = _resolve_column(
+            intervals.columns,
+            getattr(self.hparams, "inference_interval_start_idx_col", ""),
+            ["start_idx", "start_sample", "start_sample_idx"],
+        )
+        end_idx_col = _resolve_column(
+            intervals.columns,
+            getattr(self.hparams, "inference_interval_end_idx_col", ""),
+            ["end_idx", "end_sample", "end_sample_idx"],
+        )
+        anchor_idx_col = _resolve_column(
+            intervals.columns,
+            getattr(self.hparams, "inference_interval_anchor_idx_col", ""),
+            ["abnormal_start", "anchor_idx", "anchor_sample", "anchor_sample_idx", "event_ind"],
+        )
+        lookback_sec = float(getattr(self.hparams, "inference_interval_lookback_sec", 0) or 0)
+        use_anchor_window = lookback_sec > 0
+        if use_anchor_window and anchor_idx_col is None:
+            raise ValueError(
+                "Anchor-window inference needs an anchor sample column. Pass "
+                "--inference-interval-anchor-idx-col, or include abnormal_start."
+            )
+        if not use_anchor_window:
+            if start_sec_col is None and start_idx_col is None:
+                raise ValueError("Interval CSV needs a start seconds or start index column.")
+            if end_sec_col is None and end_idx_col is None:
+                raise ValueError("Interval CSV needs an end seconds or end index column.")
+
+        interval_rows = pd.DataFrame({target_key: intervals[source_key].astype(str)})
+        sample_fs = float(self.hparams.fs_data)
+        if use_anchor_window:
+            anchor_idx = pd.to_numeric(intervals[anchor_idx_col], errors="coerce")
+            interval_rows["start_idx"] = anchor_idx - lookback_sec * sample_fs
+            interval_rows["end_idx"] = anchor_idx
+        else:
+            if start_idx_col is not None:
+                interval_rows["start_idx"] = pd.to_numeric(intervals[start_idx_col], errors="coerce")
+            else:
+                interval_rows["start_idx"] = pd.to_numeric(intervals[start_sec_col], errors="coerce") * sample_fs
+            if end_idx_col is not None:
+                interval_rows["end_idx"] = pd.to_numeric(intervals[end_idx_col], errors="coerce")
+            else:
+                interval_rows["end_idx"] = pd.to_numeric(intervals[end_sec_col], errors="coerce") * sample_fs
+
+        interval_rows = interval_rows.dropna(subset=["start_idx", "end_idx"]).copy()
+        interval_rows["start_idx"] = interval_rows["start_idx"].round().astype(np.int64)
+        interval_rows["end_idx"] = interval_rows["end_idx"].round().astype(np.int64)
+        interval_rows = interval_rows[interval_rows["end_idx"] > interval_rows["start_idx"]]
+
+        base = df.copy()
+        base[target_key] = base[target_key].astype(str)
+        merged = base.merge(interval_rows, on=target_key, how="inner")
+        if merged.empty:
+            raise ValueError(
+                f"No {split_name} rows matched {interval_csv} using "
+                f"{target_key!r} <-> {source_key!r}."
+            )
+        print(
+            f"Applied inference intervals to {split_name}: "
+            f"{len(df)} base rows -> {len(merged)} interval rows"
+        )
+        return merged
+
+    def _labels_as_matrix(self, labels):
+        if labels is None:
+            return None
+        if torch.is_tensor(labels):
+            labels = labels.detach().cpu().numpy()
+        labels = np.asarray(labels)
+        if labels.size == 0:
+            return labels.reshape(0, 1)
+        if labels.ndim == 1:
+            labels = labels.reshape(-1, 1)
+        try:
+            return labels.astype(float)
+        except (TypeError, ValueError):
+            return None
+
+    def _prevalence_text(self, labels):
+        labels = self._labels_as_matrix(labels)
+        if labels is None or labels.shape[0] == 0:
+            return "n/a"
+
+        valid = ~np.isnan(labels)
+        counts = valid.sum(axis=0)
+        positives = np.nansum(labels, axis=0)
+        prevalence = np.divide(
+            positives,
+            counts,
+            out=np.full_like(positives, np.nan, dtype=float),
+            where=counts > 0,
+        )
+
+        if labels.shape[1] == 1:
+            return f"{prevalence[0]:.4f} ({int(round(positives[0]))}/{int(counts[0])})"
+
+        class_names = [str(x) for x in self.lbl_itos] if self.lbl_itos is not None else [str(i) for i in range(labels.shape[1])]
+        parts = [
+            f"{class_names[i]}={prevalence[i]:.4f} ({int(round(positives[i]))}/{int(counts[i])})"
+            for i in range(min(labels.shape[1], 5))
+        ]
+        if labels.shape[1] > 5:
+            parts.append("...")
+        return ", ".join(parts)
+
+    def _dataset_label_arrays(self, dataset):
+        if isinstance(dataset, ConcatTimeSeriesDataset):
+            record_labels = []
+            sample_labels = []
+            n_records = 0
+            n_samples = 0
+            for child in dataset.datasets:
+                child_records, child_samples, child_record_labels, child_sample_labels = self._dataset_label_arrays(child)
+                n_records += child_records
+                n_samples += child_samples
+                if child_record_labels is not None:
+                    record_labels.append(child_record_labels)
+                if child_sample_labels is not None:
+                    sample_labels.append(child_sample_labels)
+            record_labels = np.concatenate(record_labels, axis=0) if record_labels else None
+            sample_labels = np.concatenate(sample_labels, axis=0) if sample_labels else None
+            return n_records, n_samples, record_labels, sample_labels
+
+        if hasattr(dataset, "timeseries_df_label"):
+            record_labels = self._labels_as_matrix(dataset.timeseries_df_label)
+            sample_labels = record_labels[dataset.df_idx_mapping] if record_labels is not None else None
+            return len(dataset.timeseries_df_label), len(dataset), record_labels, sample_labels
+
+        if hasattr(dataset, "labels"):
+            labels = self._labels_as_matrix(dataset.labels)
+            return len(dataset), len(dataset), labels, labels
+
+        return 0, len(dataset), None, None
+
+    def print_dataset_summary(self, split_name, dataset):
+        n_records, n_samples, record_labels, sample_labels = self._dataset_label_arrays(dataset)
+        window_seconds = f"{self.hparams.input_size:g}s"
+        print(
+            f"{split_name} dataset: {n_samples} {window_seconds} samples from {n_records} rows; "
+            f"prevalence ({window_seconds} samples): {self._prevalence_text(sample_labels)}; "
+            f"prevalence (rows): {self._prevalence_text(record_labels)}",
+            flush=True,
+        )
+
     def setup(self, stage):
         if getattr(self, "embeddings_precomputed", False):
             print(f"setup({stage}): using precomputed embedding datasets")
@@ -490,6 +743,10 @@ class Main_Lite(lp.LightningModule):
                 df_val = df_mapped[df_mapped.strat_fold==max_fold_id-1]
                 df_test = df_mapped[df_mapped.strat_fold==max_fold_id]
 
+            df_train = self.apply_inference_intervals(df_train, "train")
+            df_val = self.apply_inference_intervals(df_val, "val")
+            df_test = self.apply_inference_intervals(df_test, "test")
+
             if (self.hparams.fs_model != self.hparams.fs_data):
                 tfms_lst.append(Resample(self.hparams.fs_data, self.hparams.fs_model))
             if(self.lbl_itos is None):
@@ -518,6 +775,7 @@ class Main_Lite(lp.LightningModule):
                 raw_wfdb_target_fs=self.hparams.fs_data,
                 raw_wfdb_channels=self.hparams.input_channels,
                 raw_wfdb_clip_amp=None)
+            dataset_config_train.allow_multiple_keys = not _is_empty_arg(getattr(self.hparams, "inference_interval_csv", ""))
             
             train_datasets.append(TimeSeriesDataset(dataset_config_train))
             dataset_config_val = dataclasses.replace(dataset_config_train)
@@ -525,23 +783,25 @@ class Main_Lite(lp.LightningModule):
             dataset_config_val.chunk_length= chunk_length_valtest
             dataset_config_val.stride= stride_valtest
             dataset_config_val.transforms= tfms
+            dataset_config_val.allow_multiple_keys = not _is_empty_arg(getattr(self.hparams, "inference_interval_csv", ""))
             val_datasets.append(TimeSeriesDataset(dataset_config_val))
             dataset_config_test = dataclasses.replace(dataset_config_val)
             dataset_config_test.df = df_test
+            dataset_config_test.allow_multiple_keys = not _is_empty_arg(getattr(self.hparams, "inference_interval_csv", ""))
             test_datasets.append(TimeSeriesDataset(dataset_config_test))
             print("\n",target_folder)
             if(i<len(self.hparams.data.split(","))):
-                print("train dataset:",len(train_datasets[-1]),"samples")
-            print("val dataset:",len(val_datasets[-1]),"samples")
-            print("test dataset:",len(test_datasets[-1]),"samples")
+                self.print_dataset_summary("train", train_datasets[-1])
+            self.print_dataset_summary("val", val_datasets[-1])
+            self.print_dataset_summary("test", test_datasets[-1])
         if(len(train_datasets)>1):
             print("\nCombined:")
             self.train_dataset = ConcatTimeSeriesDataset(train_datasets)
             self.val_datasets = [ConcatTimeSeriesDataset(val_datasets)]+val_datasets
-            print("train dataset:",len(self.train_dataset),"samples")
-            print("val datasets (total):",len(self.val_datasets[0]),"samples")
+            self.print_dataset_summary("train total", self.train_dataset)
+            self.print_dataset_summary("val total", self.val_datasets[0])
             self.test_datasets = [ConcatTimeSeriesDataset(test_datasets)]+test_datasets
-            print("test datasets (total):",len(self.test_datasets[0]),"samples")
+            self.print_dataset_summary("test total", self.test_datasets[0])
         else:
             self.train_dataset = train_datasets[0]
             self.val_datasets = val_datasets
@@ -579,15 +839,24 @@ class Main_Lite(lp.LightningModule):
         embeddings = torch.stack([b['embedding'] for b in batch])
         labels = torch.stack([b['label'] for b in batch])
         return {"embedding": embeddings, "label": labels}
+    def dataloader_kwargs(self, shuffle=False, drop_last=False):
+        num_workers = int(getattr(self.hparams, "num_workers", 0) or 0)
+        kwargs = {
+            "batch_size": self.hparams.batch_size,
+            "collate_fn": self.embedding_collate_fn if getattr(self, "using_precomputed_embeddings", False) else tsdata_collate_fn,
+            "num_workers": num_workers,
+            "shuffle": shuffle,
+            "drop_last": drop_last,
+        }
+        if num_workers > 0:
+            kwargs["persistent_workers"] = True
+        return kwargs
     def train_dataloader(self):
-        collate_fn = self.embedding_collate_fn if getattr(self, "using_precomputed_embeddings", False) else tsdata_collate_fn
-        return DataLoader(self.train_dataset, batch_size=self.hparams.batch_size, collate_fn=collate_fn, num_workers=0, shuffle=True, drop_last=True)
+        return DataLoader(self.train_dataset, **self.dataloader_kwargs(shuffle=True, drop_last=True))
     def val_dataloader(self):
-        collate_fn = self.embedding_collate_fn if getattr(self, "using_precomputed_embeddings", False) else tsdata_collate_fn
-        return [DataLoader(ds, batch_size=self.hparams.batch_size, collate_fn=collate_fn, num_workers=0) for ds in self.val_datasets]
+        return [DataLoader(ds, **self.dataloader_kwargs()) for ds in self.val_datasets]
     def test_dataloader(self):
-        collate_fn = self.embedding_collate_fn if getattr(self, "using_precomputed_embeddings", False) else tsdata_collate_fn
-        return [DataLoader(ds, batch_size=self.hparams.batch_size, collate_fn=collate_fn, num_workers=0) for ds in self.test_datasets]
+        return [DataLoader(ds, **self.dataloader_kwargs()) for ds in self.test_datasets]
 
     def _step(self,data_batch, batch_idx, train, test=False, dataloader_idx=0):
         model_input = data_batch["embedding"] if "embedding" in data_batch else data_batch["seq"]

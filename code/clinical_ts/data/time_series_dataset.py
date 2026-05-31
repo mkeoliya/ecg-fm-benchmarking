@@ -227,6 +227,17 @@ class TimeSeriesDataset(torch.utils.data.Dataset):
         self.start_idx_mapping=[]
         self.end_idx_mapping=[]
 
+        def row_int_or_none(row, column):
+            if column not in row.index:
+                return None
+            value = row[column]
+            if pd.isna(value):
+                return None
+            value_str = str(value).strip()
+            if value_str == "":
+                return None
+            return int(round(float(value_str)))
+
         for df_idx,(id,row) in enumerate(hparams.df.iterrows()):
             if(self.mode=="files"):
                 data_length = row["data_length"]
@@ -237,12 +248,24 @@ class TimeSeriesDataset(torch.utils.data.Dataset):
             else: #npy
                 data_length = len(self.npy_data[row[hparams.col_data]])
 
+            record_start_idx = hparams.start_idx
+            row_start_idx = row_int_or_none(row, "start_idx")
+            if row_start_idx is not None:
+                record_start_idx = max(record_start_idx, row_start_idx)
+
+            record_end_idx = data_length
+            row_end_idx = row_int_or_none(row, "end_idx")
+            if row_end_idx is not None:
+                record_end_idx = min(record_end_idx, row_end_idx)
+            if record_end_idx < record_start_idx:
+                record_end_idx = record_start_idx
+
             if(hparams.chunk_length == 0):#do not split
-                idx_start = [hparams.start_idx]
-                idx_end = [data_length]
+                idx_start = [record_start_idx]
+                idx_end = [record_end_idx]
             else:
-                idx_start = list(range(hparams.start_idx,data_length,hparams.chunk_length if hparams.stride is None else hparams.stride))
-                idx_end = [min(l+hparams.chunk_length, data_length) for l in idx_start]
+                idx_start = list(range(record_start_idx,record_end_idx,hparams.chunk_length if hparams.stride is None else hparams.stride))
+                idx_end = [min(l+hparams.chunk_length, record_end_idx) for l in idx_start]
 
             #remove final chunk(s) if too short
             for i in range(len(idx_start)):
