@@ -96,7 +96,8 @@ def cauchy_conj(v, z, w):
     z = _c2r(z)
     w = _c2r(w)
 
-    r = 2*cauchy_mult(v, z, w, backend='GPU')
+    backend = 'GPU' if v.is_cuda else 'CPU'
+    r = 2*cauchy_mult(v, z, w, backend=backend)
     return _r2c(r)
 
 
